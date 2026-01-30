@@ -1,0 +1,48 @@
+{
+  "login_url": "https://portal.wow.com.ve/admin/login/",
+  "selectors": {
+    "username": "#login",
+    "password": "#password"
+  },
+  "tables": {
+    "table1": {
+      "selector": "css=table",
+      "steps": [
+        "css=body > div.splynx-wrapper > div.main > nav > div > div > div.sidebar-menu > div > div.menu-list > div:nth-child(4) > div > a||xpath=/html/body/div[2]/div[3]/nav/div/div/div[2]/div/div[1]/div[4]/div/a",
+        "css=body > div.splynx-wrapper > div.main > nav > div > div > div.sidebar-menu > div > div.menu-list > div:nth-child(4) > div > div > div:nth-child(2) > div > a||xpath=/html/body/div[2]/div[3]/nav/div/div/div[2]/div/div[1]/div[4]/div/div/div[2]/div/a",
+        "css=#select2-admin_support_tickets_opened_filter_quick_access-container||xpath=//*[@id='select2-admin_support_tickets_opened_filter_quick_access-container']",
+        "css=li[id^='select2-admin_support_tickets_opened_filter_quick_access-result-']:has-text('All tickets')||xpath=//li[starts-with(@id,'select2-admin_support_tickets_opened_filter_quick_access-result-')][contains(.,'All tickets')]||text=All tickets||xpath=/html/body/span/span/span[2]/ul/li[4]",
+        "css=#select2-admin_support_tickets_opened_filter_status-container||xpath=//*[@id='select2-admin_support_tickets_opened_filter_status-container']",
+        {
+          "action": "fill",
+          "selector": "css=body > span > span > span.select2-search.select2-search--dropdown > input||xpath=/html/body/span/span/span[1]/input||xpath=//*[@id='opened-page']/body/span/span/span[1]/input",
+          "text": "All"
+        },
+        "css=#select2-admin_support_tickets_opened_filter_status-results li.select2-results__option--highlighted||css=#select2-admin_support_tickets_opened_filter_status-results li.select2-results__option:has-text('All')||xpath=//*[@id='select2-admin_support_tickets_opened_filter_status-results']/li[32]||xpath=/html/body/span/span/span[2]/ul/li[32]",
+        "css=#content > div > div.splynx-top-nav > div.filters-nav > div > div:nth-child(6) > button||xpath=//*[@id='content']/div/div[1]/div[2]/div/div[6]/button||xpath=/html/body/div[2]/div[3]/div[1]/div/div/div[1]/div[2]/div/div[6]/button||text=Filter",
+        "css=#select2-admin_support_tickets_opened_search_widget_group_id-container||xpath=//*[@id='select2-admin_support_tickets_opened_search_widget_group_id-container']",
+        {
+          "action": "fill",
+          "selector": "css=body > span > span > span.select2-search.select2-search--dropdown > input||xpath=/html/body/span/span/span[1]/input||xpath=//*[@id='opened-page']/body/span/span/span[1]/input",
+          "text": "Centro de Operaciones"
+        },
+        "css=li[id^='select2-admin_support_tickets_opened_search_widget_group_id-result-']:has-text('Centro de Operaciones')||xpath=//li[starts-with(@id,'select2-admin_support_tickets_opened_search_widget_group_id-result-')][contains(.,'Centro de Operaciones')]||xpath=/html/body/span/span/span[2]/ul/li[5]",
+        {
+          "action": "wait_nonempty",
+          "selector": "css=#admin_support_tickets_opened_search_widget_created_at||xpath=//*[@id='admin_support_tickets_opened_search_widget_created_at']||xpath=/html/body/div[2]/div[3]/div[1]/div/div/div[2]/div/div[2]/div/div/form/div/div[2]/div/div/input[1]",
+          "timeout_ms": 300000
+        },
+        "css=button.advanced-filter-apply-button:has-text('Aplicar')||css=button.advanced-filter-apply-button:has-text('Apply')||css=#admin_support_tickets_opened_search_block button.advanced-filter-apply-button||css=#admin_support_tickets_opened_search_block > div > div > div > button.btn.btn-primary.ms-4.advanced-filter-apply-button||xpath=//*[@id='admin_support_tickets_opened_search_block']/div/div/div/button[2]||xpath=/html/body/div[2]/div[3]/div[1]/div/div/div[2]/div/div[2]/div/div/div/button[2]||text=Aplicar||text=Apply"
+      ],
+      "output_csv": "output/tabla_1.csv"
+    },
+    "table2": {
+      "selector": "css=table",
+      "output_csv": "output/tabla_2.csv"
+    }
+  },
+  "browser": {
+    "channel": "msedge",
+    "headless": false
+  }
+}
