@@ -9,7 +9,7 @@ Este proyecto abre Splynx en **Microsoft Edge** usando **Playwright**, autocompl
 ## Instalación
 ```bash
 python -m venv .venv
-.venv\\Scripts\\activate
+source .venv/Scripts/activate
 pip install -r requirements.txt
 playwright install
 ```

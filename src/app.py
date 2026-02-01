@@ -2,9 +2,11 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import messagebox
+from pathlib import Path
 
 from .splynx_playwright import SplynxSession
 from .util import load_config
+from .excel_merge import merge_tickets_customers
 
 
 class App(tk.Tk):
@@ -20,6 +22,7 @@ class App(tk.Tk):
 
         self._session: SplynxSession | None = None
         self._session_thread: threading.Thread | None = None
+        self._merge_thread: threading.Thread | None = None
 
         self._build_ui()
         self._poll_messages()
@@ -51,9 +54,12 @@ class App(tk.Tk):
         self.extract2_btn = tk.Button(frm, text="Extraer Tabla 2", command=self._on_extract2, state=tk.DISABLED)
         self.extract2_btn.grid(row=4, column=2, sticky="we", padx=(pad, 0), pady=(0, pad))
 
+        self.merge_btn = tk.Button(frm, text="Comparar y agrupar datos", command=self._on_merge, state=tk.NORMAL)
+        self.merge_btn.grid(row=5, column=0, columnspan=3, sticky="we", pady=(0, pad))
+
         self.status_var = tk.StringVar(value="Listo. Ingresa tus credenciales.")
         self.status = tk.Label(frm, textvariable=self.status_var, anchor="w", justify=tk.LEFT, wraplength=480)
-        self.status.grid(row=5, column=0, columnspan=3, sticky="we")
+        self.status.grid(row=6, column=0, columnspan=3, sticky="we")
 
         note = (
             "Flujo: el bot abre Edge y llena usuario/clave. "
@@ -61,7 +67,7 @@ class App(tk.Tk):
             "Cuando estés en la pantalla correcta, presiona Extraer Tabla 1 o 2."
         )
         tk.Label(frm, text=note, fg="#444", wraplength=480, justify=tk.LEFT).grid(
-            row=6, column=0, columnspan=3, sticky="we", pady=(pad, 0)
+            row=7, column=0, columnspan=3, sticky="we", pady=(pad, 0)
         )
 
         for c in range(3):
@@ -118,6 +124,32 @@ class App(tk.Tk):
         if self._session:
             self._session.shutdown()
         self.destroy()
+
+    def _on_merge(self) -> None:
+        if self._merge_thread and self._merge_thread.is_alive():
+            messagebox.showinfo("En progreso", "La comparación ya está ejecutándose.")
+            return
+
+        root = Path(__file__).resolve().parents[1]
+        excel_path = root / "output" / "Datos Splynx.xlsx"
+
+        def _job() -> None:
+            try:
+                self._send("Comparando IDs y creando hoja 'Datos Completos'...")
+                total, joined, not_found = merge_tickets_customers(excel_path)
+                self._send(
+                    f"OK: Datos Completos creada. Tickets: {total}, coincidencias: {joined}, no encontrados: {not_found}."
+                )
+            except PermissionError:
+                self._send(
+                    "Error en comparación: el archivo 'output/Datos Splynx.xlsx' está abierto o bloqueado. "
+                    "Ciérralo en Excel y vuelve a intentar."
+                )
+            except Exception as exc:
+                self._send(f"Error en comparación: {exc}")
+
+        self._merge_thread = threading.Thread(target=_job, daemon=True)
+        self._merge_thread.start()
 
 
 def main() -> None:

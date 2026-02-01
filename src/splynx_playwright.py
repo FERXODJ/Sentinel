@@ -8,7 +8,7 @@ from typing import Callable, Any, Protocol
 
 from playwright.sync_api import sync_playwright, Page
 
-from .table_extract import extract_table_to_csv
+from .table_extract import extract_table_to_csv, extract_tickets_to_excel, extract_customers_to_excel
 
 
 MessageSink = Callable[[str], Any]
@@ -92,15 +92,16 @@ class SplynxSession:
                     browser.close()
 
     def _get_scope(self, page: Page) -> LocatorScope:
-        opened = page.locator("#opened-page")
-        if opened.count() > 0:
-            try:
-                tag = opened.first.evaluate("el => el.tagName.toLowerCase()")
-            except Exception:
-                tag = None
+        for frame_id in ("opened-page", "list-page"):
+            frame_loc = page.locator(f"#{frame_id}")
+            if frame_loc.count() > 0:
+                try:
+                    tag = frame_loc.first.evaluate("el => el.tagName.toLowerCase()")
+                except Exception:
+                    tag = None
 
-            if tag == "iframe":
-                return page.frame_locator("#opened-page")
+                if tag == "iframe":
+                    return page.frame_locator(f"#{frame_id}")
 
         return page
 
@@ -337,6 +338,13 @@ class SplynxSession:
                     "css=button.advanced-filter-apply-button:has-text('Aplicar')||css=button.advanced-filter-apply-button:has-text('Apply')||css=#admin_support_tickets_opened_search_block button.advanced-filter-apply-button||css=#admin_support_tickets_opened_search_block > div > div > div > button.btn.btn-primary.ms-4.advanced-filter-apply-button||xpath=//*[@id='admin_support_tickets_opened_search_block']/div/div/div/button[2]||xpath=/html/body/div[2]/div[3]/div[1]/div/div/div[2]/div/div[2]/div/div/div/button[2]||text=Aplicar||text=Apply",
                 ]
 
+            if table_key == "table2" and not steps:
+                # Defaults: Clientes -> Lista
+                steps = [
+                    "css=body > div.splynx-wrapper > div.main > nav > div > div > div.sidebar-menu > div > div.menu-list > div:nth-child(2) > div > a",
+                    "css=body > div.splynx-wrapper > div.main > nav > div > div > div.sidebar-menu > div > div.menu-list > div:nth-child(2) > div > div > div:nth-child(2) > div > a||xpath=//*[@id='list-page']/body/div[2]/div[3]/nav/div/div/div[2]/div/div[1]/div[2]/div/div/div[2]/div/a||xpath=/html/body/div[2]/div[3]/nav/div/div/div[2]/div/div[1]/div[2]/div/div/div[2]/div/a||xpath=//*[@id='list-page']/body/div[2]/div[3]/nav/div/div/div[2]/div/div[1]/div[2]/div/a||xpath=/html/body/div[2]/div[3]/nav/div/div/div[2]/div/div[1]/div[2]/div/a",
+                ]
+
             # Si hay steps, ejecutarlos en orden. Permitimos fallbacks por paso con separador "||".
             if steps:
                 self._message(f"Ejecutando navegación previa para {table_key}...")
@@ -344,9 +352,26 @@ class SplynxSession:
                     self._run_step(page, scope, step)
                     page.wait_for_timeout(600)
 
-            # Por ahora, "table1" SOLO hace clics (sin extraer nada).
             if table_key == "table1":
-                self._message("Listo: navegación completada (Tickets → List). Aún no se extrae ninguna tabla.")
+                # Luego de completar filtros, exporta la tabla visible a Excel.
+                output_xlsx = os.path.join("output", "Datos Splynx.xlsx")
+                os.makedirs(os.path.dirname(output_xlsx) or ".", exist_ok=True)
+
+                self._message("Extrayendo datos de Tickets a Excel...")
+                # Pequeña espera para que el listado recargue tras Aplicar
+                page.wait_for_timeout(1200)
+                extract_tickets_to_excel(scope, output_xlsx=output_xlsx, sheet_name="Datos de Tickets")
+                self._message(f"OK: exportado a {output_xlsx}")
+                return
+
+            if table_key == "table2":
+                output_xlsx = os.path.join("output", "Datos Splynx.xlsx")
+                os.makedirs(os.path.dirname(output_xlsx) or ".", exist_ok=True)
+
+                self._message("Extrayendo datos de Clientes a Excel (solo esta página)...")
+                page.wait_for_timeout(1200)
+                extract_customers_to_excel(scope, output_xlsx=output_xlsx, sheet_name="Datos Clientes")
+                self._message(f"OK: Clientes exportados a {output_xlsx} (hoja: Datos Clientes)")
                 return
 
             selector = table_cfg.get("selector")
