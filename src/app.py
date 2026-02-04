@@ -7,6 +7,7 @@ from pathlib import Path
 from .splynx_playwright import SplynxSession
 from .util import load_config
 from .excel_merge import merge_tickets_customers
+from .excel_reorder import reorder_datos_completos_by_template
 
 
 class App(tk.Tk):
@@ -23,6 +24,7 @@ class App(tk.Tk):
         self._session: SplynxSession | None = None
         self._session_thread: threading.Thread | None = None
         self._merge_thread: threading.Thread | None = None
+        self._reorder_thread: threading.Thread | None = None
 
         self._build_ui()
         self._poll_messages()
@@ -57,9 +59,17 @@ class App(tk.Tk):
         self.merge_btn = tk.Button(frm, text="Comparar y agrupar datos", command=self._on_merge, state=tk.NORMAL)
         self.merge_btn.grid(row=5, column=0, columnspan=3, sticky="we", pady=(0, pad))
 
+        self.reorder_btn = tk.Button(
+            frm,
+            text="Reordenar Datos Completos (plantilla WOW)",
+            command=self._on_reorder,
+            state=tk.NORMAL,
+        )
+        self.reorder_btn.grid(row=6, column=0, columnspan=3, sticky="we", pady=(0, pad))
+
         self.status_var = tk.StringVar(value="Listo. Ingresa tus credenciales.")
         self.status = tk.Label(frm, textvariable=self.status_var, anchor="w", justify=tk.LEFT, wraplength=480)
-        self.status.grid(row=6, column=0, columnspan=3, sticky="we")
+        self.status.grid(row=7, column=0, columnspan=3, sticky="we")
 
         note = (
             "Flujo: el bot abre Edge y llena usuario/clave. "
@@ -67,7 +77,7 @@ class App(tk.Tk):
             "Cuando estés en la pantalla correcta, presiona Extraer Tabla 1 o 2."
         )
         tk.Label(frm, text=note, fg="#444", wraplength=480, justify=tk.LEFT).grid(
-            row=7, column=0, columnspan=3, sticky="we", pady=(pad, 0)
+            row=8, column=0, columnspan=3, sticky="we", pady=(pad, 0)
         )
 
         for c in range(3):
@@ -113,7 +123,11 @@ class App(tk.Tk):
     def _on_extract1(self) -> None:
         if not self._session:
             return
-        self._session.request_extract(table_key="table1")
+        self._send(
+            "Tabla 1: el bot irá a Tickets > List. Luego tú colocas filtros y presionas 'Aplicar' manualmente; "
+            "cuando la tabla recargue, empieza la extracción y paginación."
+        )
+        self._session.request_extract(table_key="table1", mode="manual")
 
     def _on_extract2(self) -> None:
         if not self._session:
@@ -135,7 +149,7 @@ class App(tk.Tk):
 
         def _job() -> None:
             try:
-                self._send("Comparando IDs y creando hoja 'Datos Completos'...")
+                self._send("Comparando (Reporter ID/ID Cliente -> ID) y creando hoja 'Datos Completos'...")
                 total, joined, not_found = merge_tickets_customers(excel_path)
                 self._send(
                     f"OK: Datos Completos creada. Tickets: {total}, coincidencias: {joined}, no encontrados: {not_found}."
@@ -150,6 +164,39 @@ class App(tk.Tk):
 
         self._merge_thread = threading.Thread(target=_job, daemon=True)
         self._merge_thread.start()
+
+    def _on_reorder(self) -> None:
+        if (self._merge_thread and self._merge_thread.is_alive()) or (
+            self._reorder_thread and self._reorder_thread.is_alive()
+        ):
+            messagebox.showinfo("En progreso", "Primero espera a que termine la comparación/merge.")
+            return
+
+        root = Path(__file__).resolve().parents[1]
+        excel_path = root / "output" / "Datos Splynx.xlsx"
+        template_path = root / "Tickets WOW Enero 2026 rev-2.xlsx"
+
+        def _job() -> None:
+            try:
+                self._send("Reordenando 'Datos Completos' según plantilla WOW...")
+                rows, cols = reorder_datos_completos_by_template(
+                    excel_path=excel_path,
+                    template_path=template_path,
+                    datos_completos_sheet="Datos Completos",
+                    template_sheet=None,
+                    keep_extra_columns=True,
+                )
+                self._send(f"OK: 'Datos Completos' reordenado. Filas: {rows}, columnas: {cols}.")
+            except PermissionError:
+                self._send(
+                    "Error al reordenar: el archivo 'output/Datos Splynx.xlsx' está abierto o bloqueado. "
+                    "Ciérralo en Excel y vuelve a intentar."
+                )
+            except Exception as exc:
+                self._send(f"Error al reordenar: {exc}")
+
+        self._reorder_thread = threading.Thread(target=_job, daemon=True)
+        self._reorder_thread.start()
 
 
 def main() -> None:

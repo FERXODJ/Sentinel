@@ -4,6 +4,7 @@ import csv
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 
 from typing import Protocol
@@ -59,18 +60,112 @@ def extract_tickets_to_excel(
     table = scope.locator(table_selector).first
     table.wait_for(state="visible")
 
-    # Índices (1-based) según lo que nos diste en el header
-    col_map = [
-        ("ID", 2),
-        ("Tema", 3),
-        ("Customer/Lead", 4),
-        ("Prioridad", 5),
-        ("Estado", 6),
-        ("Group", 7),
-        ("Tipo", 8),
-        ("Asignado a", 9),
-        ("Watching", 10),
-        ("ID Cliente", 11),
+    def _norm_header(s: str) -> str:
+        # Normaliza: minúsculas, espacios, y sin acentos (para matchear "actualización" vs "actualizacion").
+        s = (s or "").strip().lower()
+        try:
+            import unicodedata
+
+            s = "".join(
+                c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+            )
+        except Exception:
+            pass
+        s = " ".join(s.split())
+        return s
+
+    def _header_index_map() -> dict[str, int]:
+        """Mapea header normalizado -> índice 0-based de la columna en la tabla."""
+        table_loc = scope.locator(table_selector).first
+        ths = table_loc.locator("thead tr th")
+        try:
+            texts = ths.all_inner_texts()
+        except Exception:
+            texts = []
+
+        m: dict[str, int] = {}
+        for idx, t in enumerate(texts):
+            key = _norm_header(t)
+            if key and key not in m:
+                m[key] = idx
+        return m
+
+    header_map = _header_index_map()
+
+    def _pick_idx(*aliases: str) -> int | None:
+        for a in aliases:
+            if not a:
+                continue
+            key = _norm_header(a)
+            if key in header_map:
+                return header_map[key]
+        return None
+
+    # Columnas a exportar (orden fijo). Se resuelven por texto del header.
+    # Si alguna no existe/está oculta en la UI, se exporta vacía.
+    col_map: list[tuple[str, int | None]] = [
+        ("ID", _pick_idx("ID")),
+        ("Tema", _pick_idx("Tema", "Subject")),
+        ("Customer/Lead", _pick_idx("Customer / Lead", "Customer/Lead", "Customer", "Lead")),
+        ("Prioridad", _pick_idx("Prioridad", "Priority")),
+        ("Estado", _pick_idx("Estado", "Status")),
+        ("Group", _pick_idx("Group", "Grupo")),
+        ("Tipo", _pick_idx("Tipo", "Type")),
+        ("Asignado a", _pick_idx("Asignado a", "Assignee", "Assigned to")),
+        ("Watching", _pick_idx("Watching", "Watchers")),
+        ("Labels", _pick_idx("Labels", "Etiquetas")),
+        ("Reporter", _pick_idx("Reporter", "Reportero")),
+        ("Reporter ID", _pick_idx("Reporter ID", "ReporterID")),
+        ("Reporter type", _pick_idx("Reporter type", "Reporter Type")),
+        (
+            "ID Cliente",
+            _pick_idx(
+                "ID Cliente",
+                "ID cliente",
+                "ID de cliente",
+                "ID de clientes",
+                "ID del cliente",
+                "Customer ID",
+                "Client ID",
+            ),
+        ),
+        ("Incoming Customer", _pick_idx("Incoming Customer")),
+        ("Hide", _pick_idx("Hide")),
+        ("Task", _pick_idx("Task", "Tarea")),
+        ("Estrella", _pick_idx("Estrella", "Star")),
+        (
+            "Creado (fecha y hora)",
+            _pick_idx(
+                "Creado (fecha y hora)",
+                "Creado de fecha y hora",
+                "Creado",
+                "Created",
+                "Created at",
+                "Fecha de creación",
+                "Fecha y hora de creacion",
+            ),
+        ),
+        ("Source", _pick_idx("Source", "Origen")),
+        (
+            "Actualizado (fecha y hora)",
+            _pick_idx(
+                "Actualizado (fecha y hora)",
+                "fecha y hora de actualización",
+                "Fecha y hora de actualización",
+                "Actualizado",
+                "Updated",
+                "Updated at",
+                "Fecha de actualización",
+                "Fecha y hora de actualizacion",
+            ),
+        ),
+        ("Archive", _pick_idx("Archive", "Archivado")),
+        ("Shareable", _pick_idx("Shareable")),
+        # Opcionales adicionales (si aparecen en tu tabla)
+        ("Note", _pick_idx("Note", "Nota")),
+        ("Sub-tipo de Ticket", _pick_idx("Sub-tipo de Ticket", "Sub-type", "Subtype")),
+        ("Categoria del Cierre", _pick_idx("Categoria del Cierre", "Closure category", "Close category")),
+        ("Promocion", _pick_idx("Promocion", "Promotion")),
     ]
 
     def _normalize_id_cliente(text: str) -> str:
@@ -102,9 +197,8 @@ def extract_tickets_to_excel(
             cell_count = cells.count()
 
             out_row: List[str] = []
-            for col_name, one_based_idx in col_map:
-                zero_idx = one_based_idx - 1
-                if zero_idx < 0 or zero_idx >= cell_count:
+            for col_name, zero_idx in col_map:
+                if zero_idx is None or zero_idx < 0 or zero_idx >= cell_count:
                     out_row.append("")
                     continue
                 txt = cells.nth(zero_idx).inner_text().strip()
@@ -401,10 +495,23 @@ def _wait_for_datatable_ready(scope: LocatorScope, table_selector: str, timeout_
 
 
 def _open_or_create_workbook(path: str) -> Workbook:
+    p = Path(path)
+    if not p.exists():
+        return Workbook()
+
     try:
         return load_workbook(path)
-    except Exception:
-        return Workbook()
+    except PermissionError as exc:
+        raise PermissionError(
+            f"No se puede abrir '{path}'. Probablemente está abierto en Excel o bloqueado. "
+            "Ciérralo y vuelve a intentar."
+        ) from exc
+    except Exception as exc:
+        # Importante: NO crear un archivo nuevo si el existente no se pudo leer,
+        # porque eso termina sobrescribiendo el Excel y perdiendo pestañas.
+        raise RuntimeError(
+            f"No se pudo leer el Excel existente '{path}'. No se modificó el archivo. Detalle: {exc}"
+        ) from exc
 
 
 def _get_fresh_sheet(wb: Workbook, sheet_name: str):

@@ -93,6 +93,11 @@ def _require(cols: SheetColumns, name: str) -> int:
     return cols.header_to_col[key]
 
 
+def _optional(cols: SheetColumns, name: str) -> int | None:
+    key = _norm_header(name)
+    return cols.header_to_col.get(key)
+
+
 def merge_tickets_customers(
     excel_path: str | Path,
     tickets_sheet: str = "Datos de Tickets",
@@ -104,11 +109,18 @@ def merge_tickets_customers(
     """Crea/rehace una hoja 'Datos Completos' haciendo join por ID.
 
     Join:
-      - Tickets['ID Cliente'] (solo dígitos)
-      - Clientes['ID`, solo dígitos]
+            - Tickets['Reporter ID'] (cuando Reporter type = 'customer')
+            - Clientes['ID']
+
+        Fallback (para tickets creados por admins u otros casos):
+            - Si Reporter type != 'customer' o Reporter ID viene vacío, se intenta con Tickets['ID Cliente'].
 
     Escribe:
-      - Columnas de Tickets: ID, Tema, Customer/Lead, Prioridad, Estado, Group, Tipo, Asignado a, Watching, ID Cliente
+            - Columnas de Tickets (según lo solicitado):
+                ID, Customer/Lead, Prioridad, Estado, Group, Tipo, Asignado a, Watching, Labels,
+                Reporter, Reporter ID, Reporter type, ID Cliente, Incoming Customer, Hide, Task, Estrella,
+                Creado (fecha y hora), Source, Actualizado (fecha y hora), Archive, Shareable, Note,
+                Sub-tipo de Ticket, Categoria del Cierre, Promocion
       - Columnas de Clientes: Socio, Residencia/Urbanización
 
     Returns: (tickets_rows_total, rows_joined, rows_not_found)
@@ -132,15 +144,52 @@ def merge_tickets_customers(
 
     # Tickets
     t_id = _require(t_cols, "ID")
-    t_tema = _require(t_cols, "Tema")
-    t_customer = _require(t_cols, "Customer/Lead")
-    t_prioridad = _require(t_cols, "Prioridad")
-    t_estado = _require(t_cols, "Estado")
-    t_group = _require(t_cols, "Group")
-    t_tipo = _require(t_cols, "Tipo")
-    t_asignado = _require(t_cols, "Asignado a")
-    t_watching = _require(t_cols, "Watching")
-    t_id_cliente = _require(t_cols, "ID Cliente")
+    t_reporter_id = _optional(t_cols, "Reporter ID")
+    t_reporter_type = _optional(t_cols, "Reporter type")
+    t_id_cliente = _optional(t_cols, "ID Cliente")
+
+    if not (isinstance(t_reporter_id, int) and t_reporter_id > 0) and not (
+        isinstance(t_id_cliente, int) and t_id_cliente > 0
+    ):
+        raise KeyError(
+            "No se encontró 'Reporter ID' ni 'ID Cliente' en 'Datos de Tickets' (necesito al menos una para comparar)."
+        )
+
+    ticket_out_cols: List[str] = [
+        "ID",
+        "Customer/Lead",
+        "Prioridad",
+        "Estado",
+        "Group",
+        "Tipo",
+        "Asignado a",
+        "Watching",
+        "Labels",
+        "Reporter",
+        "Reporter ID",
+        "Reporter type",
+        "ID Cliente",
+        "Incoming Customer",
+        "Hide",
+        "Task",
+        "Estrella",
+        "Creado (fecha y hora)",
+        "Source",
+        "Actualizado (fecha y hora)",
+        "Archive",
+        "Shareable",
+        "Note",
+        "Sub-tipo de Ticket",
+        "Categoria del Cierre",
+        "Promocion",
+    ]
+
+    # Mapa de columnas de tickets para lectura (opcionales excepto ID/ID Cliente)
+    t_col_idx: Dict[str, int | None] = {name: _optional(t_cols, name) for name in ticket_out_cols}
+    t_col_idx["ID"] = t_id
+    t_col_idx["Reporter ID"] = t_reporter_id
+    t_col_idx["Reporter type"] = t_reporter_type
+    t_col_idx["ID Cliente"] = t_id_cliente
 
     # Clientes
     c_id = _require(c_cols, "ID")
@@ -173,31 +222,10 @@ def merge_tickets_customers(
         wb.remove(wb[summary_sheet])
     ws_s = wb.create_sheet(title=summary_sheet)
 
-    out_headers = [
-        "ID",
-        "Tema",
-        "Customer/Lead",
-        "Prioridad",
-        "Estado",
-        "Group",
-        "Tipo",
-        "Asignado a",
-        "Watching",
-        "ID Cliente",
-        "Socio",
-        "Residencia/Urbanización",
-    ]
+    out_headers = [*ticket_out_cols, "Socio", "Residencia/Urbanización"]
     ws_o.append(out_headers)
 
-    nf_headers = [
-        "ID",
-        "Tema",
-        "Customer/Lead",
-        "Estado",
-        "Tipo",
-        "Asignado a",
-        "ID Cliente",
-    ]
+    nf_headers = [*ticket_out_cols]
     ws_nf.append(nf_headers)
 
     tickets_total = 0
@@ -210,6 +238,7 @@ def merge_tickets_customers(
     ws_s.append(["Tickets (filas en hoja)", ws_t.max_row - 1])
     ws_s.append(["Clientes (filas en hoja)", ws_c.max_row - 1])
     ws_s.append(["Clientes (IDs únicos)", len(customer_map)])
+    ws_s.append(["Join", "Tickets(Reporter ID/ID Cliente) -> Clientes(ID)"])
 
     def _safe_int(x: str) -> int | None:
         try:
@@ -222,56 +251,91 @@ def merge_tickets_customers(
         ws_s.append(["Clientes ID min", min(c_ints)])
         ws_s.append(["Clientes ID max", max(c_ints)])
 
+    # Diagnóstico
+    used_reporter_id = 0
+    used_id_cliente = 0
+    reporter_type_customer = 0
+    reporter_type_admin = 0
+    reporter_type_other = 0
+    blank_join_id = 0
+
+    def _norm_type(v) -> str:
+        s = str(v or "").strip().lower()
+        return s
+
     for r in range(2, ws_t.max_row + 1):
         tickets_total += 1
-        tid_cliente = _id_key(ws_t.cell(row=r, column=t_id_cliente).value)
-        if not tid_cliente:
+
+        reporter_id_val = ""
+        if isinstance(t_reporter_id, int) and t_reporter_id > 0:
+            reporter_id_val = _id_key(ws_t.cell(row=r, column=t_reporter_id).value)
+
+        reporter_type_val = ""
+        if isinstance(t_reporter_type, int) and t_reporter_type > 0:
+            reporter_type_val = _norm_type(ws_t.cell(row=r, column=t_reporter_type).value)
+
+        if reporter_type_val == "customer":
+            reporter_type_customer += 1
+        elif reporter_type_val == "admin":
+            reporter_type_admin += 1
+        elif reporter_type_val:
+            reporter_type_other += 1
+
+        id_cliente_val = ""
+        if isinstance(t_id_cliente, int) and t_id_cliente > 0:
+            id_cliente_val = _id_key(ws_t.cell(row=r, column=t_id_cliente).value)
+
+        # Selección de clave (prioriza Reporter ID si el reporter es customer)
+        join_id = ""
+        if reporter_type_val == "customer" and reporter_id_val:
+            join_id = reporter_id_val
+            used_reporter_id += 1
+        elif id_cliente_val:
+            join_id = id_cliente_val
+            used_id_cliente += 1
+        elif reporter_id_val:
+            # Si no sabemos el tipo pero hay reporter_id, mejor intentar igual.
+            join_id = reporter_id_val
+            used_reporter_id += 1
+
+        if not join_id:
+            blank_join_id += 1
             not_found += 1
             not_found_counts[""] = not_found_counts.get("", 0) + 1
-            ws_nf.append(
-                [
-                    ws_t.cell(row=r, column=t_id).value,
-                    ws_t.cell(row=r, column=t_tema).value,
-                    ws_t.cell(row=r, column=t_customer).value,
-                    ws_t.cell(row=r, column=t_estado).value,
-                    ws_t.cell(row=r, column=t_tipo).value,
-                    ws_t.cell(row=r, column=t_asignado).value,
-                    "",
-                ]
-            )
+            nf_row: List = []
+            for name in ticket_out_cols:
+                col = t_col_idx.get(name)
+                if isinstance(col, int) and col > 0:
+                    nf_row.append(ws_t.cell(row=r, column=col).value)
+                else:
+                    nf_row.append("")
+            ws_nf.append(nf_row)
             continue
-        extra = customer_map.get(tid_cliente)
+
+        extra = customer_map.get(join_id)
         if not extra:
             not_found += 1
-            not_found_counts[tid_cliente] = not_found_counts.get(tid_cliente, 0) + 1
-            ws_nf.append(
-                [
-                    ws_t.cell(row=r, column=t_id).value,
-                    ws_t.cell(row=r, column=t_tema).value,
-                    ws_t.cell(row=r, column=t_customer).value,
-                    ws_t.cell(row=r, column=t_estado).value,
-                    ws_t.cell(row=r, column=t_tipo).value,
-                    ws_t.cell(row=r, column=t_asignado).value,
-                    tid_cliente,
-                ]
-            )
+            not_found_counts[join_id] = not_found_counts.get(join_id, 0) + 1
+            nf_row2: List = []
+            for name in ticket_out_cols:
+                col = t_col_idx.get(name)
+                if isinstance(col, int) and col > 0:
+                    nf_row2.append(ws_t.cell(row=r, column=col).value)
+                else:
+                    nf_row2.append("")
+            ws_nf.append(nf_row2)
             continue
 
         socio, res = extra
-        row = [
-            ws_t.cell(row=r, column=t_id).value,
-            ws_t.cell(row=r, column=t_tema).value,
-            ws_t.cell(row=r, column=t_customer).value,
-            ws_t.cell(row=r, column=t_prioridad).value,
-            ws_t.cell(row=r, column=t_estado).value,
-            ws_t.cell(row=r, column=t_group).value,
-            ws_t.cell(row=r, column=t_tipo).value,
-            ws_t.cell(row=r, column=t_asignado).value,
-            ws_t.cell(row=r, column=t_watching).value,
-            tid_cliente,
-            socio,
-            res,
-        ]
+        row: List = []
+        for name in ticket_out_cols:
+            col = t_col_idx.get(name)
+            if isinstance(col, int) and col > 0:
+                row.append(ws_t.cell(row=r, column=col).value)
+            else:
+                row.append("")
+
+        row.extend([socio, res])
         ws_o.append(row)
         joined += 1
 
@@ -279,6 +343,13 @@ def merge_tickets_customers(
     ws_s.append(["Tickets total (procesados)", tickets_total])
     ws_s.append(["Coincidencias (join)", joined])
     ws_s.append(["No encontrados", not_found])
+    ws_s.append(["Tickets sin ID para comparar", blank_join_id])
+    ws_s.append(["Join usando Reporter ID", used_reporter_id])
+    ws_s.append(["Join usando ID Cliente (fallback)", used_id_cliente])
+    if reporter_type_customer or reporter_type_admin or reporter_type_other:
+        ws_s.append(["Reporter type = customer", reporter_type_customer])
+        ws_s.append(["Reporter type = admin", reporter_type_admin])
+        ws_s.append(["Reporter type = otros", reporter_type_other])
 
     # Lista de IDs no encontrados (top) con conteo
     ws_s.append([""])  # separador
