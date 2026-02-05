@@ -54,6 +54,9 @@ class SplynxSession:
         self._enrich_excel_path: str | None = None
         self._enrich_running = False
 
+        self._collect_dates_event = threading.Event()
+        self._collect_ticket_id: str | None = None
+
         self._page_ready = threading.Event()
         self._page: Page | None = None
 
@@ -82,6 +85,20 @@ class SplynxSession:
             return
         self._enrich_excel_path = str(excel_path)
         self._enrich_event.set()
+
+    def request_collect_dates_nav(self, *, ticket_id: str) -> None:
+        """Navega vía Fast Search al ticket (para luego extraer fechas)."""
+        if not self._page_ready.is_set():
+            self._message("Aún no está listo el navegador. Espera unos segundos y vuelve a intentar.")
+            return
+
+        tid = str(ticket_id or "").strip()
+        if not tid:
+            self._message("Fechas Esc/Cie: no se recibió Ticket ID.")
+            return
+
+        self._collect_ticket_id = tid
+        self._collect_dates_event.set()
 
     def run(self, username: str, password: str) -> None:
         channel = str(self._config.browser.get("channel", "msedge"))
@@ -120,7 +137,8 @@ class SplynxSession:
                     browser.close()
 
     def _get_scope(self, page: Page) -> LocatorScope:
-        for frame_id in ("opened-page", "list-page"):
+        # Splynx suele renderizar vistas dentro de iframes con distintos IDs según la pantalla.
+        for frame_id in ("opened-page", "list-page", "opened--view-page"):
             frame_loc = page.locator(f"#{frame_id}")
             if frame_loc.count() > 0:
                 try:
@@ -380,7 +398,88 @@ class SplynxSession:
                 self._enrich_event.clear()
                 self._do_enrich_missing(page)
 
+            if self._collect_dates_event.is_set():
+                self._collect_dates_event.clear()
+                tid = self._collect_ticket_id or ""
+                self._collect_ticket_id = None
+                self._do_collect_dates_nav(page, ticket_id=tid)
+
             page.wait_for_timeout(250)
+
+    def _do_collect_dates_nav(self, page: Page, *, ticket_id: str) -> None:
+        tid = str(ticket_id or "").strip()
+        if not tid:
+            self._message("Fechas Esc/Cie: Ticket ID vacío.")
+            return
+
+        try:
+            self._message(f"Fechas Esc/Cie: abriendo búsqueda y buscando ticket {tid}...")
+            self._fast_search_fill(page, tid)
+            page.wait_for_timeout(400)
+            ok = self._fast_search_pick_ticket(page, tid)
+            if not ok:
+                self._message(
+                    "Fechas Esc/Cie: no pude seleccionar el ticket en los resultados. "
+                    "Confirma que el ID existe y que el panel de búsqueda muestra la opción de ticket."
+                )
+                return
+
+            wanted_digits = self._id_key(tid)
+            scope = self._get_scope(page)
+            self._message("Fechas Esc/Cie: ticket seleccionado. Abriendo 'Acciones'...")
+
+            # Paso 1: click en botón Acciones
+            actions_candidates = [
+                # Preferir explícitamente el dropdown por texto
+                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} button:has-text('Acciones')",
+                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} button:has-text('Acciones')",
+                f"css=div[id$='_sticky_sidebar_{wanted_digits}'] button:has-text('Acciones')",
+                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} button:has-text('Actions')",
+                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} button:has-text('Actions')",
+                f"css=div[id$='_sticky_sidebar_{wanted_digits}'] button:has-text('Actions')",
+
+                # Fallback por clase/atributo de dropdown
+                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} button.dropdown-toggle",
+                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} button.dropdown-toggle",
+                f"css=div[id$='_sticky_sidebar_{wanted_digits}'] button.dropdown-toggle",
+                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} button[data-bs-toggle='dropdown']",
+                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} button[data-bs-toggle='dropdown']",
+                f"css=div[id$='_sticky_sidebar_{wanted_digits}'] button[data-bs-toggle='dropdown']",
+
+                # Fallback exactos provistos (sirven para pruebas/inspección)
+                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} > div > div.panel-actions.row-gap-4.column-gap-4 > div > button",
+                f"xpath=//*[@id='admin_support_tickets_closed_sticky_sidebar_{wanted_digits}']/div/div[2]/div/button",
+                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} > div > div.panel-actions.row-gap-4.column-gap-4 > div > button",
+                f"xpath=//*[@id='admin_support_tickets_opened_sticky_sidebar_{wanted_digits}']/div/div[2]/div/button",
+            ]
+
+            # Primero intentar en el scope (iframe); si falla, probar en la página raíz.
+            try:
+                self._click_any(scope, actions_candidates)
+            except Exception:
+                self._click_any(page, actions_candidates)
+            page.wait_for_timeout(250)
+
+            # Paso 2: click en Show activities
+            self._message("Fechas Esc/Cie: clic en 'Show activities'...")
+            activities_candidates = [
+                f"css=#admin_support_tickets_closed_view_show_hide_activities_{wanted_digits}",
+                f"css=#admin_support_tickets_opened_view_show_hide_activities_{wanted_digits}",
+                f"css=[id$='_view_show_hide_activities_{wanted_digits}']",
+                f"xpath=//*[@id='admin_support_tickets_closed_view_show_hide_activities_{wanted_digits}']",
+                f"xpath=//*[@id='admin_support_tickets_opened_view_show_hide_activities_{wanted_digits}']",
+            ]
+
+            # Igual: intentar en iframe primero y luego en page.
+            try:
+                self._click_any(scope, activities_candidates)
+            except Exception:
+                self._click_any(page, activities_candidates)
+            page.wait_for_timeout(400)
+
+            self._message("Fechas Esc/Cie: actividades visibles. Listo para el próximo paso.")
+        except Exception as exc:
+            self._message(f"Fechas Esc/Cie: error navegando al ticket: {exc}")
 
     def _norm_text(self, s: str) -> str:
         s = (s or "").strip().lower()
@@ -504,6 +603,7 @@ class SplynxSession:
             "css=body > div.splynx-wrapper > div.splynx-header > ul > li:nth-child(2)",
             "xpath=//*[@id='dashboard-page']/body/div[2]/div[2]/ul/li[2]",
             "xpath=/html/body/div[2]/div[2]/ul/li[2]",
+            "xpath=//*[@id='opened--view-page']/body/div[2]/div[2]/ul/li[2]",
         ]
         self._click_any(page, selectors)
 
@@ -526,6 +626,7 @@ class SplynxSession:
             "css=body > div.splynx-wrapper > div.sidebar-wrapper > div > div.sidebar-content > div > div.search-wrapper > div > input",
             "xpath=//*[@id='dashboard-page']/body/div[2]/div[5]/div/div[2]/div/div[1]/div/input",
             "xpath=/html/body/div[2]/div[5]/div/div[2]/div/div[1]/div/input",
+            "xpath=//*[@id='opened--view-page']/body/div[2]/div[5]/div/div[2]/div/div[1]/div/input",
             "css=div.search-wrapper input",
         ]
         try:
@@ -545,6 +646,7 @@ class SplynxSession:
             "css=body > div.splynx-wrapper > div.sidebar-wrapper > div > div.sidebar-content > div > div.search-wrapper > div > input",
             "xpath=//*[@id='dashboard-page']/body/div[2]/div[5]/div/div[2]/div/div[1]/div/input",
             "xpath=/html/body/div[2]/div[5]/div/div[2]/div/div[1]/div/input",
+            "xpath=//*[@id='opened--view-page']/body/div[2]/div[5]/div/div[2]/div/div[1]/div/input",
             "css=div.search-wrapper input",
         ]
         self._click_any(page, selectors)
@@ -635,6 +737,96 @@ class SplynxSession:
                 f"css=#fast_search_result > tr:has-text('Cliente:'):has-text('{wanted_digits}') td",
                 f"css=#fast_search_result > tr:has-text('{wanted_digits}') a",
                 f"css=#fast_search_result > tr:has-text('{wanted_digits}') td",
+            ]
+            try:
+                self._click_any(page, candidates)
+                return True
+            except Exception:
+                return False
+
+        try:
+            rows.nth(best_idx).locator("td").first.click()
+            return True
+        except Exception:
+            try:
+                rows.nth(best_idx).click()
+                return True
+            except Exception:
+                return False
+
+    def _fast_search_pick_ticket(self, page: Page, ticket_id: str) -> bool:
+        wanted_digits = self._id_key(str(ticket_id))
+        if not wanted_digits:
+            return False
+
+        try:
+            page.locator("css=#fast_search_result").first.wait_for(state="visible", timeout=10_000)
+        except Exception:
+            return False
+
+        rows = page.locator("css=#fast_search_result > tr")
+        deadline = time.monotonic() + 12.0
+        while True:
+            if time.monotonic() > deadline:
+                return False
+            try:
+                if rows.count() > 0:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        def _first_line(txt: str) -> str:
+            t = "\n".join([ln.strip() for ln in (txt or "").splitlines() if ln.strip()])
+            if not t:
+                return ""
+            return t.split("\n", 1)[0].strip()
+
+        best_idx: int | None = None
+        best_score = -1
+        try:
+            row_count = rows.count()
+        except Exception:
+            row_count = 0
+
+        for i in range(min(row_count, 40)):
+            try:
+                txt = rows.nth(i).inner_text() or ""
+            except Exception:
+                continue
+
+            compact = " ".join(txt.split())
+            if wanted_digits not in compact:
+                continue
+
+            first = self._norm_text(_first_line(txt))
+            all_norm = self._norm_text(compact)
+
+            score = 0
+            score += 10  # match por ID
+            if "ticket" in all_norm:
+                score += 80
+            if first.startswith("ticket") or first.startswith("closed ticket") or first.startswith("open ticket"):
+                score += 50
+
+            # penalizar entradas que no son tickets
+            if "cliente" in first or "cliente" in all_norm:
+                score -= 30
+            if "pago" in first or "invoice" in first or "recibo" in first or "documento" in first:
+                score -= 40
+
+            if score > best_score:
+                best_score = score
+                best_idx = i
+
+        if best_idx is None:
+            # Fallback explícito del usuario (puede variar, pero sirve para pruebas)
+            candidates = [
+                f"css=#fast_search_result > tr:has-text('{wanted_digits}'):has-text('ticket') td",
+                f"css=#fast_search_result > tr:has-text('{wanted_digits}'):has-text('Ticket') td",
+                "css=#fast_search_result > tr:nth-child(4) > td",
+                "xpath=//*[@id='fast_search_result']/tr[4]/td",
+                "xpath=/html/body/div[2]/div[5]/div/div[2]/div/div[2]/div/table/tr[4]/td",
             ]
             try:
                 self._click_any(page, candidates)

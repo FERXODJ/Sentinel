@@ -28,6 +28,7 @@ class App(tk.Tk):
         self._merge_thread: threading.Thread | None = None
         self._reorder_thread: threading.Thread | None = None
         self._enrich_thread: threading.Thread | None = None
+        self._nav_dates_thread: threading.Thread | None = None
 
         self._build_ui()
         self._poll_messages()
@@ -78,12 +79,20 @@ class App(tk.Tk):
         )
         self.reorder_btn.grid(row=7, column=0, columnspan=3, sticky="we", pady=(0, pad))
 
+        self.nav_dates_btn = tk.Button(
+            frm,
+            text="Recolectar Fechas Esc/Cie",
+            command=self._on_nav_dates,
+            state=tk.DISABLED,
+        )
+        self.nav_dates_btn.grid(row=8, column=0, columnspan=3, sticky="we", pady=(0, pad))
+
         self.status_var = tk.StringVar(value="Listo. Ingresa tus credenciales.")
         self.status = tk.Label(frm, textvariable=self.status_var, anchor="w", justify=tk.LEFT, wraplength=680)
-        self.status.grid(row=8, column=0, columnspan=3, sticky="we")
+        self.status.grid(row=9, column=0, columnspan=3, sticky="we")
 
         self.log = scrolledtext.ScrolledText(frm, height=8, wrap=tk.WORD)
-        self.log.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(pad, 0))
+        self.log.grid(row=10, column=0, columnspan=3, sticky="nsew", pady=(pad, 0))
         self.log.configure(state=tk.DISABLED)
 
         note = (
@@ -92,13 +101,13 @@ class App(tk.Tk):
             "Cuando estés en la pantalla correcta, presiona Extraer Tabla 1 o 2."
         )
         tk.Label(frm, text=note, fg="#444", wraplength=480, justify=tk.LEFT).grid(
-            row=10, column=0, columnspan=3, sticky="we", pady=(pad, 0)
+            row=11, column=0, columnspan=3, sticky="we", pady=(pad, 0)
         )
 
         for c in range(3):
             frm.grid_columnconfigure(c, weight=1)
 
-        frm.grid_rowconfigure(9, weight=1)
+        frm.grid_rowconfigure(10, weight=1)
 
     def _send(self, msg: str) -> None:
         self._messages.put(msg)
@@ -144,6 +153,7 @@ class App(tk.Tk):
         self.extract1_btn.config(state=tk.NORMAL)
         self.extract2_btn.config(state=tk.NORMAL)
         self.enrich_btn.config(state=tk.NORMAL)
+        self.nav_dates_btn.config(state=tk.NORMAL)
 
     def _on_extract1(self) -> None:
         if not self._session:
@@ -158,6 +168,77 @@ class App(tk.Tk):
         if not self._session:
             return
         self._session.request_extract(table_key="table2")
+
+    def _on_nav_dates(self) -> None:
+        if not self._session:
+            messagebox.showinfo("Sesión requerida", "Primero abre Splynx con el botón 'Abrir Splynx'.")
+            return
+
+        if self._nav_dates_thread and self._nav_dates_thread.is_alive():
+            messagebox.showinfo("En progreso", "La navegación para fechas ya está ejecutándose.")
+            return
+
+        root = Path(__file__).resolve().parents[1]
+        excel_path = root / "output" / "Datos Splynx.xlsx"
+
+        def _job() -> None:
+            try:
+                if not excel_path.exists():
+                    self._send(
+                        "No existe 'output/Datos Splynx.xlsx'. Ejecuta primero: Extraer Tabla 1/2 y luego 'Comparar y agrupar datos'."
+                    )
+                    return
+
+                self._send("Leyendo primer ID desde 'Datos Completos' para navegar al ticket...")
+
+                from openpyxl.reader.excel import load_workbook
+                import re
+
+                wb = load_workbook(excel_path, read_only=True, data_only=True)
+                if "Datos Completos" not in wb.sheetnames:
+                    self._send("No existe la hoja 'Datos Completos'. Ejecuta primero 'Comparar y agrupar datos'.")
+                    return
+
+                ws = wb["Datos Completos"]
+                headers = [str(ws.cell(row=1, column=c).value or "").strip() for c in range(1, ws.max_column + 1)]
+                id_col = None
+                for idx0, h in enumerate(headers):
+                    if h.strip().lower() == "id":
+                        id_col = idx0 + 1
+                        break
+
+                if not id_col:
+                    self._send("No encontré la columna 'ID' en 'Datos Completos'.")
+                    return
+
+                ticket_id = ""
+                for r in range(2, min(ws.max_row + 1, 5000)):
+                    v = ws.cell(row=r, column=id_col).value
+                    if v is None:
+                        continue
+                    s = str(v).strip()
+                    if not s:
+                        continue
+                    m = re.findall(r"\d+", s)
+                    if m:
+                        ticket_id = max(m, key=len)
+                        break
+
+                if not ticket_id:
+                    self._send("No pude obtener un ID válido desde 'Datos Completos'.")
+                    return
+
+                self._send(f"Navegando por Fast Search al ticket ID {ticket_id}...")
+                self._session.request_collect_dates_nav(ticket_id=ticket_id)
+            except PermissionError:
+                self._send(
+                    "No pude leer el Excel porque está abierto/bloqueado. Cierra 'output/Datos Splynx.xlsx' y reintenta."
+                )
+            except Exception as exc:
+                self._send(f"Error preparando navegación de fechas: {exc}")
+
+        self._nav_dates_thread = threading.Thread(target=_job, daemon=True)
+        self._nav_dates_thread.start()
 
     def _on_enrich_missing(self) -> None:
         if not self._session:
