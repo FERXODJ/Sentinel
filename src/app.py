@@ -2,6 +2,7 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import messagebox
+import tkinter.scrolledtext as scrolledtext
 from pathlib import Path
 
 from .splynx_playwright import SplynxSession
@@ -15,8 +16,9 @@ class App(tk.Tk):
         super().__init__()
 
         self.title("Splynx Scraper (Edge + Playwright)")
-        self.geometry("520x320")
-        self.resizable(False, False)
+        self.geometry("720x520")
+        self.minsize(720, 520)
+        self.resizable(True, True)
 
         self._config = load_config()
         self._messages: "queue.Queue[str]" = queue.Queue()
@@ -25,6 +27,7 @@ class App(tk.Tk):
         self._session_thread: threading.Thread | None = None
         self._merge_thread: threading.Thread | None = None
         self._reorder_thread: threading.Thread | None = None
+        self._enrich_thread: threading.Thread | None = None
 
         self._build_ui()
         self._poll_messages()
@@ -56,8 +59,16 @@ class App(tk.Tk):
         self.extract2_btn = tk.Button(frm, text="Extraer Tabla 2", command=self._on_extract2, state=tk.DISABLED)
         self.extract2_btn.grid(row=4, column=2, sticky="we", padx=(pad, 0), pady=(0, pad))
 
+        self.enrich_btn = tk.Button(
+            frm,
+            text="Buscar datos no encontrados en (Splynx)",
+            command=self._on_enrich_missing,
+            state=tk.DISABLED,
+        )
+        self.enrich_btn.grid(row=5, column=0, columnspan=3, sticky="we", pady=(0, pad))
+
         self.merge_btn = tk.Button(frm, text="Comparar y agrupar datos", command=self._on_merge, state=tk.NORMAL)
-        self.merge_btn.grid(row=5, column=0, columnspan=3, sticky="we", pady=(0, pad))
+        self.merge_btn.grid(row=6, column=0, columnspan=3, sticky="we", pady=(0, pad))
 
         self.reorder_btn = tk.Button(
             frm,
@@ -65,11 +76,15 @@ class App(tk.Tk):
             command=self._on_reorder,
             state=tk.NORMAL,
         )
-        self.reorder_btn.grid(row=6, column=0, columnspan=3, sticky="we", pady=(0, pad))
+        self.reorder_btn.grid(row=7, column=0, columnspan=3, sticky="we", pady=(0, pad))
 
         self.status_var = tk.StringVar(value="Listo. Ingresa tus credenciales.")
-        self.status = tk.Label(frm, textvariable=self.status_var, anchor="w", justify=tk.LEFT, wraplength=480)
-        self.status.grid(row=7, column=0, columnspan=3, sticky="we")
+        self.status = tk.Label(frm, textvariable=self.status_var, anchor="w", justify=tk.LEFT, wraplength=680)
+        self.status.grid(row=8, column=0, columnspan=3, sticky="we")
+
+        self.log = scrolledtext.ScrolledText(frm, height=8, wrap=tk.WORD)
+        self.log.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(pad, 0))
+        self.log.configure(state=tk.DISABLED)
 
         note = (
             "Flujo: el bot abre Edge y llena usuario/clave. "
@@ -77,11 +92,13 @@ class App(tk.Tk):
             "Cuando estés en la pantalla correcta, presiona Extraer Tabla 1 o 2."
         )
         tk.Label(frm, text=note, fg="#444", wraplength=480, justify=tk.LEFT).grid(
-            row=8, column=0, columnspan=3, sticky="we", pady=(pad, 0)
+            row=10, column=0, columnspan=3, sticky="we", pady=(pad, 0)
         )
 
         for c in range(3):
             frm.grid_columnconfigure(c, weight=1)
+
+        frm.grid_rowconfigure(9, weight=1)
 
     def _send(self, msg: str) -> None:
         self._messages.put(msg)
@@ -91,6 +108,13 @@ class App(tk.Tk):
             while True:
                 msg = self._messages.get_nowait()
                 self.status_var.set(msg)
+                try:
+                    self.log.configure(state=tk.NORMAL)
+                    self.log.insert(tk.END, msg + "\n")
+                    self.log.see(tk.END)
+                    self.log.configure(state=tk.DISABLED)
+                except Exception:
+                    pass
         except queue.Empty:
             pass
         self.after(200, self._poll_messages)
@@ -119,6 +143,7 @@ class App(tk.Tk):
         # Habilitamos extracción; si presionas antes de estar listo, el bot te avisará.
         self.extract1_btn.config(state=tk.NORMAL)
         self.extract2_btn.config(state=tk.NORMAL)
+        self.enrich_btn.config(state=tk.NORMAL)
 
     def _on_extract1(self) -> None:
         if not self._session:
@@ -133,6 +158,31 @@ class App(tk.Tk):
         if not self._session:
             return
         self._session.request_extract(table_key="table2")
+
+    def _on_enrich_missing(self) -> None:
+        if not self._session:
+            messagebox.showinfo("Sesión requerida", "Primero abre Splynx con el botón 'Abrir Splynx'.")
+            return
+
+        if self._enrich_thread and self._enrich_thread.is_alive():
+            messagebox.showinfo("En progreso", "La búsqueda/enriquecimiento ya está ejecutándose.")
+            return
+
+        root = Path(__file__).resolve().parents[1]
+        excel_path = root / "output" / "Datos Splynx.xlsx"
+
+        def _job() -> None:
+            try:
+                self._send(
+                    "Iniciando búsqueda en Splynx para IDs de 'Datos no Encontrados'... "
+                    "(cierra 'output/Datos Splynx.xlsx' si lo tienes abierto)"
+                )
+                self._session.request_enrich_missing(excel_path=str(excel_path))
+            except Exception as exc:
+                self._send(f"Error iniciando búsqueda/enriquecimiento: {exc}")
+
+        self._enrich_thread = threading.Thread(target=_job, daemon=True)
+        self._enrich_thread.start()
 
     def _on_close(self) -> None:
         if self._session:
