@@ -185,6 +185,7 @@ class App(tk.Tk):
                     datos_completos_sheet="Datos Completos",
                     template_sheet=None,
                     keep_extra_columns=True,
+                    exclude_columns=["Residencia/Urbanización"],
                 )
                 self._send(f"OK: 'Datos Completos' reordenado. Filas: {rows}, columnas: {cols}.")
             except PermissionError:

@@ -117,7 +117,7 @@ def merge_tickets_customers(
 
     Escribe:
             - Columnas de Tickets (según lo solicitado):
-                ID, Customer/Lead, Prioridad, Estado, Group, Tipo, Asignado a, Watching, Labels,
+                ID, Tema, Customer/Lead, Prioridad, Estado, Group, Tipo, Asignado a, Watching, Labels,
                 Reporter, Reporter ID, Reporter type, ID Cliente, Incoming Customer, Hide, Task, Estrella,
                 Creado (fecha y hora), Source, Actualizado (fecha y hora), Archive, Shareable, Note,
                 Sub-tipo de Ticket, Categoria del Cierre, Promocion
@@ -157,6 +157,7 @@ def merge_tickets_customers(
 
     ticket_out_cols: List[str] = [
         "ID",
+        "Tema",
         "Customer/Lead",
         "Prioridad",
         "Estado",

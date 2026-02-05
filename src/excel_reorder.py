@@ -72,12 +72,14 @@ def reorder_datos_completos_by_template(
     datos_completos_sheet: str = "Datos Completos",
     template_sheet: str | None = None,
     keep_extra_columns: bool = True,
+    exclude_columns: Iterable[str] | None = None,
 ) -> Tuple[int, int]:
     """Reordena/renombra columnas de 'Datos Completos' según una plantilla.
 
     - El orden y nombres de columnas se toman desde la fila 1 del template.
     - Si una columna del template no existe en Datos Completos, se agrega vacía.
     - Opcionalmente conserva columnas extras al final (keep_extra_columns=True).
+    - Permite excluir columnas específicas por nombre (exclude_columns).
 
     Returns: (rows_copied, out_columns)
     """
@@ -107,6 +109,13 @@ def reorder_datos_completos_by_template(
     tpl_headers_raw = [h for h in _sheet_headers(ws_tpl) if h]
     if not tpl_headers_raw:
         raise ValueError("La plantilla no tiene encabezados en la fila 1.")
+
+    excluded_keys: set[str] = set()
+    if exclude_columns:
+        excluded_keys = {_norm_key(c) for c in exclude_columns if _norm_key(c)}
+
+    if excluded_keys:
+        tpl_headers_raw = [h for h in tpl_headers_raw if _norm_key(h) not in excluded_keys]
 
     src_headers_raw = _sheet_headers(ws_src)
     src_index = _build_col_index(src_headers_raw)
@@ -143,6 +152,8 @@ def reorder_datos_completos_by_template(
             if not h:
                 continue
             src_key = _norm_key(h)
+            if excluded_keys and src_key in excluded_keys:
+                continue
             if not src_key or src_key in covered_source_keys:
                 continue
             if src_key in seen_extra_keys:
