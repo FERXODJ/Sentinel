@@ -189,47 +189,11 @@ class App(tk.Tk):
                     )
                     return
 
-                self._send("Leyendo primer ID desde 'Datos Completos' para navegar al ticket...")
-
-                from openpyxl.reader.excel import load_workbook
-                import re
-
-                wb = load_workbook(excel_path, read_only=True, data_only=True)
-                if "Datos Completos" not in wb.sheetnames:
-                    self._send("No existe la hoja 'Datos Completos'. Ejecuta primero 'Comparar y agrupar datos'.")
-                    return
-
-                ws = wb["Datos Completos"]
-                headers = [str(ws.cell(row=1, column=c).value or "").strip() for c in range(1, ws.max_column + 1)]
-                id_col = None
-                for idx0, h in enumerate(headers):
-                    if h.strip().lower() == "id":
-                        id_col = idx0 + 1
-                        break
-
-                if not id_col:
-                    self._send("No encontré la columna 'ID' en 'Datos Completos'.")
-                    return
-
-                ticket_id = ""
-                for r in range(2, min(ws.max_row + 1, 5000)):
-                    v = ws.cell(row=r, column=id_col).value
-                    if v is None:
-                        continue
-                    s = str(v).strip()
-                    if not s:
-                        continue
-                    m = re.findall(r"\d+", s)
-                    if m:
-                        ticket_id = max(m, key=len)
-                        break
-
-                if not ticket_id:
-                    self._send("No pude obtener un ID válido desde 'Datos Completos'.")
-                    return
-
-                self._send(f"Navegando por Fast Search al ticket ID {ticket_id}...")
-                self._session.request_collect_dates_nav(ticket_id=ticket_id)
+                self._send(
+                    "Fechas Esc/Cie: iniciaré la recolección en 'Datos Completos' y crearé columnas nuevas: "
+                    "'Fecha Escalamiento (O&M)' y 'Fecha Cierre (closed)'."
+                )
+                self._session.request_collect_dates_from_excel(excel_path=str(excel_path))
             except PermissionError:
                 self._send(
                     "No pude leer el Excel porque está abierto/bloqueado. Cierra 'output/Datos Splynx.xlsx' y reintenta."

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 import re
+import json
+import shutil
 import threading
 import time
-from datetime import date
+import zipfile
+from datetime import date, datetime
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Any, Protocol
@@ -56,6 +59,8 @@ class SplynxSession:
 
         self._collect_dates_event = threading.Event()
         self._collect_ticket_id: str | None = None
+        self._collect_dates_excel_path: str | None = None
+        self._collect_dates_running = False
 
         self._page_ready = threading.Event()
         self._page: Page | None = None
@@ -98,6 +103,30 @@ class SplynxSession:
             return
 
         self._collect_ticket_id = tid
+        self._collect_dates_excel_path = None
+        self._collect_dates_event.set()
+
+    def request_collect_dates_from_excel(self, *, excel_path: str) -> None:
+        """Completa fechas en 'Datos Completos' (último Escalamiento O&M y último closed)."""
+        if not self._page_ready.is_set():
+            self._message("Aún no está listo el navegador. Espera unos segundos y vuelve a intentar.")
+            return
+
+        path = str(excel_path or "").strip()
+        if not path:
+            self._message("Fechas Esc/Cie: no se recibió ruta de Excel.")
+            return
+
+        if not os.path.exists(path):
+            self._message(f"Fechas Esc/Cie: no existe el archivo: {path}")
+            return
+
+        if self._collect_dates_running:
+            self._message("Fechas Esc/Cie: ya hay una recolección en progreso.")
+            return
+
+        self._collect_ticket_id = None
+        self._collect_dates_excel_path = path
         self._collect_dates_event.set()
 
     def run(self, username: str, password: str) -> None:
@@ -400,9 +429,15 @@ class SplynxSession:
 
             if self._collect_dates_event.is_set():
                 self._collect_dates_event.clear()
-                tid = self._collect_ticket_id or ""
+                excel_path = self._collect_dates_excel_path
+                tid = self._collect_ticket_id
+                self._collect_dates_excel_path = None
                 self._collect_ticket_id = None
-                self._do_collect_dates_nav(page, ticket_id=tid)
+
+                if excel_path:
+                    self._do_collect_dates_from_excel(page, excel_path=excel_path)
+                else:
+                    self._do_collect_dates_nav(page, ticket_id=str(tid or ""))
 
             page.wait_for_timeout(250)
 
@@ -426,60 +461,882 @@ class SplynxSession:
 
             wanted_digits = self._id_key(tid)
             scope = self._get_scope(page)
-            self._message("Fechas Esc/Cie: ticket seleccionado. Abriendo 'Acciones'...")
-
-            # Paso 1: click en botón Acciones
-            actions_candidates = [
-                # Preferir explícitamente el dropdown por texto
-                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} button:has-text('Acciones')",
-                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} button:has-text('Acciones')",
-                f"css=div[id$='_sticky_sidebar_{wanted_digits}'] button:has-text('Acciones')",
-                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} button:has-text('Actions')",
-                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} button:has-text('Actions')",
-                f"css=div[id$='_sticky_sidebar_{wanted_digits}'] button:has-text('Actions')",
-
-                # Fallback por clase/atributo de dropdown
-                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} button.dropdown-toggle",
-                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} button.dropdown-toggle",
-                f"css=div[id$='_sticky_sidebar_{wanted_digits}'] button.dropdown-toggle",
-                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} button[data-bs-toggle='dropdown']",
-                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} button[data-bs-toggle='dropdown']",
-                f"css=div[id$='_sticky_sidebar_{wanted_digits}'] button[data-bs-toggle='dropdown']",
-
-                # Fallback exactos provistos (sirven para pruebas/inspección)
-                f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted_digits} > div > div.panel-actions.row-gap-4.column-gap-4 > div > button",
-                f"xpath=//*[@id='admin_support_tickets_closed_sticky_sidebar_{wanted_digits}']/div/div[2]/div/button",
-                f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted_digits} > div > div.panel-actions.row-gap-4.column-gap-4 > div > button",
-                f"xpath=//*[@id='admin_support_tickets_opened_sticky_sidebar_{wanted_digits}']/div/div[2]/div/button",
-            ]
-
-            # Primero intentar en el scope (iframe); si falla, probar en la página raíz.
-            try:
-                self._click_any(scope, actions_candidates)
-            except Exception:
-                self._click_any(page, actions_candidates)
-            page.wait_for_timeout(250)
-
-            # Paso 2: click en Show activities
-            self._message("Fechas Esc/Cie: clic en 'Show activities'...")
-            activities_candidates = [
-                f"css=#admin_support_tickets_closed_view_show_hide_activities_{wanted_digits}",
-                f"css=#admin_support_tickets_opened_view_show_hide_activities_{wanted_digits}",
-                f"css=[id$='_view_show_hide_activities_{wanted_digits}']",
-                f"xpath=//*[@id='admin_support_tickets_closed_view_show_hide_activities_{wanted_digits}']",
-                f"xpath=//*[@id='admin_support_tickets_opened_view_show_hide_activities_{wanted_digits}']",
-            ]
-
-            # Igual: intentar en iframe primero y luego en page.
-            try:
-                self._click_any(scope, activities_candidates)
-            except Exception:
-                self._click_any(page, activities_candidates)
-            page.wait_for_timeout(400)
-
+            self._message("Fechas Esc/Cie: ticket seleccionado. Abriendo 'Acciones' y mostrando actividades...")
+            self._ensure_ticket_activities_visible(page, scope, ticket_id_digits=wanted_digits, timeout_ms=20_000)
             self._message("Fechas Esc/Cie: actividades visibles. Listo para el próximo paso.")
         except Exception as exc:
             self._message(f"Fechas Esc/Cie: error navegando al ticket: {exc}")
+
+    def _open_actions_dropdown(
+        self,
+        page: Page,
+        root: LocatorScope,
+        *,
+        ticket_id_digits: str,
+        timeout_ms: int,
+    ) -> None:
+        """Abre el dropdown 'Acciones' (debe funcionar con <button> o <a>)."""
+        wanted = self._id_key(ticket_id_digits)
+        if not wanted:
+            raise RuntimeError("ticket_id inválido")
+
+        sidebar_candidates = [
+            f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted}",
+            f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted}",
+            f"css=div[id$='_sticky_sidebar_{wanted}']",
+        ]
+
+        def _get_sidebar(scope: LocatorScope):
+            for sel in sidebar_candidates:
+                try:
+                    loc = scope.locator(sel).first
+                    if loc.count() > 0 and loc.is_visible():
+                        return loc
+                except Exception:
+                    continue
+            return None
+
+        sidebar = _get_sidebar(root)
+        if sidebar is None:
+            sidebar = _get_sidebar(page)
+
+        actions_candidates = [
+            # Preferir por texto dentro del sidebar específico.
+            f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted} :is(a,button):has-text('Acciones')",
+            f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted} :is(a,button):has-text('Acciones')",
+            f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted} :is(a,button):has-text('Actions')",
+            f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted} :is(a,button):has-text('Actions')",
+
+            # Fallback por estructura típica del panel-actions.
+            f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted} div.panel-actions.row-gap-4.column-gap-4 > div > :is(a,button)",
+            f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted} div.panel-actions.row-gap-4.column-gap-4 > div > :is(a,button)",
+
+            # Fallback por clase/atributo de dropdown, pero sin ser tan amplio.
+            f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted} :is(a,button).dropdown-toggle",
+            f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted} :is(a,button).dropdown-toggle",
+            f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted} :is(a,button)[data-bs-toggle='dropdown']",
+            f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted} :is(a,button)[data-bs-toggle='dropdown']",
+
+            # XPaths históricos (último recurso)
+            f"xpath=//*[@id='admin_support_tickets_opened_sticky_sidebar_{wanted}']/div/div[2]/div/button",
+            f"xpath=//*[@id='admin_support_tickets_closed_sticky_sidebar_{wanted}']/div/div[2]/div/button",
+        ]
+
+        last_exc: Exception | None = None
+        start = time.monotonic()
+        while True:
+            if (time.monotonic() - start) * 1000.0 > timeout_ms:
+                if last_exc:
+                    raise last_exc
+                raise RuntimeError("timeout abriendo el dropdown 'Acciones'")
+
+            for sel in actions_candidates:
+                try:
+                    loc = root.locator(sel).first
+                    if loc.count() == 0:
+                        continue
+                    loc.wait_for(state="visible", timeout=2_000)
+                    loc.scroll_into_view_if_needed()
+                    try:
+                        loc.click()
+                    except Exception:
+                        try:
+                            loc.click(force=True)
+                        except Exception:
+                            loc.evaluate("el => el.click()")
+
+                    # Verificar que el dropdown realmente abrió (aria-expanded o dropdown-menu.show)
+                    opened = False
+                    check_until = time.monotonic() + 2.0
+                    while time.monotonic() < check_until:
+                        try:
+                            if (loc.get_attribute("aria-expanded") or "").strip().lower() == "true":
+                                opened = True
+                                break
+                        except Exception:
+                            pass
+
+                        try:
+                            if sidebar is not None:
+                                menu = sidebar.locator("css=.dropdown-menu.show").first
+                                if menu.count() > 0 and menu.is_visible():
+                                    opened = True
+                                    break
+                        except Exception:
+                            pass
+
+                        time.sleep(0.1)
+
+                    if opened:
+                        return
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+
+            time.sleep(0.2)
+
+    def _click_menu_item_any(self, page: Page, root: LocatorScope, selectors: list[str]) -> None:
+        """Click robusto para items de menú (asegura click en <a> o <button> si el selector apunta al <li>)."""
+        last_exc: Exception | None = None
+
+        def _try(scope: LocatorScope, sel: str) -> bool:
+            loc = scope.locator(sel).first
+            if loc.count() == 0:
+                return False
+            loc.wait_for(state="visible", timeout=4_000)
+            loc.scroll_into_view_if_needed()
+
+            try:
+                tag = (loc.evaluate("el => el.tagName.toLowerCase()") or "").strip().lower()
+            except Exception:
+                tag = ""
+
+            target = loc
+            if tag and tag not in ("a", "button"):
+                try:
+                    child = loc.locator("css=a,button").first
+                    if child.count() > 0:
+                        child.wait_for(state="visible", timeout=2_000)
+                        child.scroll_into_view_if_needed()
+                        target = child
+                except Exception:
+                    pass
+
+            try:
+                target.click()
+            except Exception:
+                try:
+                    target.click(force=True)
+                except Exception:
+                    target.evaluate("el => el.click()")
+            return True
+
+        for sel in selectors:
+            try:
+                if _try(root, sel):
+                    return
+            except Exception as exc:
+                last_exc = exc
+
+            try:
+                if _try(page, sel):
+                    return
+            except Exception as exc:
+                last_exc = exc
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("no pude clicar el item del menú")
+
+    def _do_collect_dates_from_excel(self, page: Page, *, excel_path: str) -> None:
+        if self._collect_dates_running:
+            self._message("Fechas Esc/Cie: ya hay una recolección en progreso.")
+            return
+
+        self._collect_dates_running = True
+        try:
+            try:
+                wb = self._open_or_create_workbook(excel_path)
+            except PermissionError:
+                self._message(
+                    "Fechas Esc/Cie: no puedo abrir/guardar el Excel porque está abierto o bloqueado. "
+                    "Cierra 'output/Datos Splynx.xlsx' y reintenta."
+                )
+                return
+            except Exception as exc:
+                self._message(f"Fechas Esc/Cie: el Excel no es válido o está dañado: {exc}")
+                self._message(
+                    "Solución: abre el archivo en Excel y usa 'Guardar como' .xlsx, o vuelve a generar el archivo con Extraer/Comparar."
+                )
+                return
+            if "Datos Completos" not in wb.sheetnames:
+                self._message(
+                    "Fechas Esc/Cie: no existe la hoja 'Datos Completos'. Ejecuta primero 'Comparar y agrupar datos'."
+                )
+                return
+
+            ws = wb["Datos Completos"]
+            if ws.max_row < 2:
+                self._message("Fechas Esc/Cie: la hoja 'Datos Completos' está vacía.")
+                return
+
+            headers = [str(ws.cell(row=1, column=c).value or "").strip() for c in range(1, ws.max_column + 1)]
+
+            def _find_header(name: str) -> int | None:
+                n = (name or "").strip().lower()
+                for idx0, h in enumerate(headers):
+                    if (h or "").strip().lower() == n:
+                        return idx0 + 1
+                return None
+
+            id_col = _find_header("ID")
+            if not id_col:
+                self._message("Fechas Esc/Cie: no encontré la columna 'ID' en 'Datos Completos'.")
+                return
+
+            # Asegurar columnas en orden: Escalamiento, Resuelto, Cierre.
+            esc_col = _find_header("Fecha Escalamiento (O&M)")
+            res_col = _find_header("Resuelto")
+            cie_col = _find_header("Fecha Cierre (closed)")
+
+            if not esc_col:
+                esc_col = ws.max_column + 1
+                ws.cell(row=1, column=esc_col).value = "Fecha Escalamiento (O&M)"
+                headers.append("Fecha Escalamiento (O&M)")
+
+            # Resuelto debe ir entre Escalamiento y Cierre.
+            if not res_col:
+                if cie_col:
+                    # Insertar justo antes de Cierre para quedar en el medio.
+                    ws.insert_cols(cie_col)
+                    res_col = cie_col
+                    ws.cell(row=1, column=res_col).value = "Resuelto"
+                    headers.insert(res_col - 1, "Resuelto")
+                    cie_col = cie_col + 1
+                else:
+                    res_col = ws.max_column + 1
+                    ws.cell(row=1, column=res_col).value = "Resuelto"
+                    headers.append("Resuelto")
+
+            if not cie_col:
+                cie_col = ws.max_column + 1
+                ws.cell(row=1, column=cie_col).value = "Fecha Cierre (closed)"
+                headers.append("Fecha Cierre (closed)")
+
+            ticket_rows: list[tuple[int, str]] = []
+            for r in range(2, ws.max_row + 1):
+                raw = ws.cell(row=r, column=id_col).value
+                tid = self._id_key(raw)
+                if tid:
+                    ticket_rows.append((r, tid))
+
+            if not ticket_rows:
+                self._message("Fechas Esc/Cie: no encontré IDs válidos en 'Datos Completos'.")
+                return
+
+            total = len(ticket_rows)
+            self._message(f"Fechas Esc/Cie: iniciando recolección para {total} tickets...")
+
+            # Backup best-effort para evitar pérdida si hay un corte durante un save.
+            self._ensure_excel_backup(excel_path)
+
+            # Reanudar desde checkpoint si existe.
+            progress_path = self._progress_path_for_excel(excel_path)
+            progress = self._load_progress(progress_path)
+            start_row_idx = int(progress.get("last_row_idx") or 0)
+            start_index = 0
+            if start_row_idx:
+                for idx0, (ridx, _) in enumerate(ticket_rows):
+                    if ridx == start_row_idx:
+                        start_index = min(idx0 + 1, len(ticket_rows))
+                        break
+                if start_index:
+                    self._message(
+                        f"Fechas Esc/Cie: reanudando desde fila {start_row_idx} (posición {start_index}/{total})."
+                    )
+
+            updated = 0
+            skipped = 0
+            failed = 0
+            saved_at = time.monotonic()
+
+            def _is_missing(v: str) -> bool:
+                t = str(v or "").strip()
+                if not t:
+                    return True
+                return t.strip().lower() in ("n/a", "na")
+
+            for i, (row_idx, ticket_id) in enumerate(ticket_rows[start_index:], start=start_index + 1):
+                existing_esc = str(ws.cell(row=row_idx, column=esc_col).value or "").strip()
+                existing_res = str(ws.cell(row=row_idx, column=res_col).value or "").strip()
+                existing_cie = str(ws.cell(row=row_idx, column=cie_col).value or "").strip()
+
+                # Si ya hay valores reales (no vacíos y no N/A) en las 3, saltar.
+                if not _is_missing(existing_esc) and not _is_missing(existing_res) and not _is_missing(existing_cie):
+                    skipped += 1
+                    continue
+
+                self._message(f"Fechas Esc/Cie: [{i}/{total}] Ticket {ticket_id}...")
+
+                esc_dt = ""
+                res_dt = ""
+                close_dt = ""
+                last_exc: Exception | None = None
+
+                for attempt in range(1, 4):
+                    try:
+                        esc_dt, res_dt, close_dt = self._collect_dates_for_ticket(page, ticket_id=ticket_id)
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        msg = str(exc).lower()
+                        retryable = any(
+                            k in msg
+                            for k in (
+                                "timeout",
+                                "fast search",
+                                "internet_disconnected",
+                                "err_internet_disconnected",
+                                "err_network_changed",
+                                "err_connection",
+                                "net::",
+                                "navigation",
+                            )
+                        )
+                        if attempt >= 3 or not retryable:
+                            break
+
+                        self._message(
+                            f"Fechas Esc/Cie: Ticket {ticket_id}: reintento {attempt}/3 por error: {exc}"
+                        )
+                        self._recover_page_after_error(page)
+                        time.sleep(2.0)
+
+                if last_exc is None:
+                    # Si el dato no existe, escribir N/A (para que no se vea vacío)
+                    esc_out = esc_dt or "N/A"
+                    res_out = res_dt or "N/A"
+                    close_out = close_dt or "N/A"
+
+                    if _is_missing(existing_esc):
+                        ws.cell(row=row_idx, column=esc_col).value = esc_out
+                    if _is_missing(existing_res):
+                        ws.cell(row=row_idx, column=res_col).value = res_out
+                    if _is_missing(existing_cie):
+                        ws.cell(row=row_idx, column=cie_col).value = close_out
+
+                    updated += 1
+                    self._message(
+                        f"Fechas Esc/Cie: Ticket {ticket_id}: Esc(O&M)={'OK' if esc_dt else 'NO'}, Resuelto={'OK' if res_dt else 'NO'}, Cierre(closed)={'OK' if close_dt else 'NO'}."
+                    )
+                else:
+                    failed += 1
+                    self._message(f"Fechas Esc/Cie: Ticket {ticket_id}: error: {last_exc}")
+
+                # Guardar checkpoint (aunque falle) para poder reanudar cerca de donde quedó.
+                self._save_progress(
+                    progress_path,
+                    {
+                        "excel": excel_path,
+                        "last_row_idx": row_idx,
+                        "last_ticket_id": ticket_id,
+                        "updated": updated,
+                        "skipped": skipped,
+                        "failed": failed,
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+
+                if (updated + failed) % 10 == 0 or (time.monotonic() - saved_at) > 30:
+                    try:
+                        self._atomic_save_workbook(wb, excel_path)
+                        saved_at = time.monotonic()
+                    except PermissionError:
+                        self._message(
+                            "Fechas Esc/Cie: no pude guardar el Excel (está abierto/bloqueado). Cierra el archivo y reintenta."
+                        )
+                        return
+
+            try:
+                self._atomic_save_workbook(wb, excel_path)
+            except PermissionError:
+                self._message(
+                    "Fechas Esc/Cie: no pude guardar el Excel al final (está abierto/bloqueado). Cierra el archivo y reintenta."
+                )
+                return
+
+            # Marcar checkpoint final como terminado.
+            self._save_progress(
+                progress_path,
+                {
+                    "excel": excel_path,
+                    "done": True,
+                    "updated": updated,
+                    "skipped": skipped,
+                    "failed": failed,
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+
+            self._message(f"Fechas Esc/Cie: terminado. Actualizados: {updated}, saltados: {skipped}, fallos: {failed}.")
+        finally:
+            self._collect_dates_running = False
+
+    def _recover_page_after_error(self, page: Page) -> None:
+        """Recovery best-effort cuando la UI se queda pegada o hay cortes de internet."""
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(150)
+        except Exception:
+            pass
+
+        # Intentar recargar sin bloquear demasiado.
+        try:
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_timeout(400)
+        except Exception:
+            pass
+
+    def _progress_path_for_excel(self, excel_path: str) -> str:
+        # Guardar al lado del Excel para que sea fácil ubicarlo.
+        return f"{excel_path}.progress.json"
+
+    def _load_progress(self, path: str) -> dict[str, object]:
+        try:
+            if not os.path.exists(path):
+                return {}
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_progress(self, path: str, data: dict[str, object]) -> None:
+        try:
+            tmp = f"{path}.tmp"
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
+    def _ensure_excel_backup(self, excel_path: str) -> None:
+        """Crea un .bak una sola vez (best-effort)."""
+        try:
+            if not os.path.exists(excel_path):
+                return
+            bak = f"{excel_path}.bak"
+            if os.path.exists(bak):
+                return
+            shutil.copy2(excel_path, bak)
+            self._message(f"Fechas Esc/Cie: backup creado: {bak}")
+        except Exception:
+            # No bloquear la ejecución si no se puede respaldar.
+            pass
+
+    def _atomic_save_workbook(self, wb: Workbook, excel_path: str) -> None:
+        """Guarda el .xlsx de forma atómica (temp + replace) para evitar archivos corruptos."""
+        tmp = f"{excel_path}.tmp"
+        wb.save(tmp)
+        os.replace(tmp, excel_path)
+
+    def _collect_dates_for_ticket(self, page: Page, *, ticket_id: str) -> tuple[str, str, str]:
+        tid = str(ticket_id or "").strip()
+        if not tid:
+            return ("", "")
+
+        self._fast_search_fill(page, tid)
+        page.wait_for_timeout(400)
+        if not self._fast_search_pick_ticket(page, tid):
+            raise RuntimeError("no pude seleccionar el ticket en el Fast Search")
+
+        # Dar tiempo a que Splynx navegue/renderice la vista seleccionada.
+        page.wait_for_timeout(250)
+
+        wanted_digits = self._id_key(tid)
+        if wanted_digits:
+            if not self._wait_ticket_view_loaded_for_id(page, wanted_digits, timeout_ms=35_000):
+                raise RuntimeError("timeout esperando que cargue el ticket correcto")
+
+        # A veces la búsqueda abre un modal ("Búsqueda") que queda encima y bloquea clicks.
+        # Cerrarlo best-effort antes de interactuar con el panel lateral.
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(120)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(120)
+        except Exception:
+            pass
+
+        # El scope puede cambiar al navegar; re-evalúalo antes de interactuar.
+        scope = self._get_scope(page)
+        self._ensure_ticket_activities_visible(page, scope, ticket_id_digits=wanted_digits, timeout_ms=30_000)
+
+        # Verificación extra: esperar a que activities realmente cargue contenido.
+        # Esto evita continuar “demasiado rápido” cuando el dropdown se clickea pero el historial aún no renderiza.
+        blocks = self._wait_activities_loaded(page, scope, timeout_ms=25_000, min_blocks=1)
+        if blocks <= 0:
+            raise RuntimeError("no se cargaron actividades (historial vacío/no visible)")
+
+        # Mensaje breve de certificación (ayuda a auditar que sí hubo carga de historial).
+        try:
+            self._message(f"Fechas Esc/Cie: Ticket {tid}: activities cargadas ({blocks} bloques).")
+        except Exception:
+            pass
+
+        esc_dt = self._extract_last_escalation_om(scope, page)
+        res_dt = self._extract_last_resuelto(scope, page)
+        close_dt = self._extract_last_closed(scope, page)
+
+        # Algunos tickets (especialmente cerrados) cargan el historial de forma parcial/lazy.
+        # Si no aparece el evento de cierre, intentar cargar más activities (scroll) y reintentar 1 vez.
+        if not close_dt or not res_dt:
+            try:
+                self._message(f"Fechas Esc/Cie: Ticket {tid}: cargando más activities para validar cierre/resuelto...")
+            except Exception:
+                pass
+            self._load_more_activities_by_scrolling(page)
+            if not res_dt:
+                res_dt = self._extract_last_resuelto(scope, page)
+            close_dt = self._extract_last_closed(scope, page)
+        return (esc_dt, res_dt, close_dt)
+
+    def _load_more_activities_by_scrolling(self, page: Page) -> None:
+        """Best-effort: hace scroll para disparar carga lazy de historial."""
+        try:
+            # Hacer varios scrolls hacia abajo suele cargar más bloques.
+            for _ in range(4):
+                try:
+                    page.mouse.wheel(0, 2200)
+                except Exception:
+                    try:
+                        page.evaluate("() => window.scrollBy(0, 2200)")
+                    except Exception:
+                        pass
+                page.wait_for_timeout(250)
+
+            # Y un poco hacia arriba para estabilizar.
+            for _ in range(2):
+                try:
+                    page.mouse.wheel(0, -1200)
+                except Exception:
+                    try:
+                        page.evaluate("() => window.scrollBy(0, -1200)")
+                    except Exception:
+                        pass
+                page.wait_for_timeout(200)
+        except Exception:
+            pass
+
+    def _has_word(self, norm: str, word: str) -> bool:
+        w = (word or "").strip().lower()
+        if not w:
+            return False
+        # límites alfanuméricos (evita coincidir dentro de otras palabras)
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(w)}(?![a-z0-9])", norm or ""))
+
+    def _count_activity_blocks(self, page: Page, scope: LocatorScope) -> int:
+        sel = "css=div[id^='opened-ticket-message-']"
+        best = 0
+        try:
+            c = scope.locator(sel).count()
+            best = max(best, int(c or 0))
+        except Exception:
+            pass
+        try:
+            c = page.locator(sel).count()
+            best = max(best, int(c or 0))
+        except Exception:
+            pass
+        return best
+
+    def _wait_activities_loaded(self, page: Page, scope: LocatorScope, *, timeout_ms: int, min_blocks: int = 1) -> int:
+        """Espera a que el historial/activities tenga bloques renderizados.
+
+        Retorna el número de bloques detectados (máximo entre iframe y page).
+        """
+        start = time.monotonic()
+        last = 0
+        while True:
+            if (time.monotonic() - start) * 1000.0 > timeout_ms:
+                return last
+            last = self._count_activity_blocks(page, scope)
+            if last >= int(min_blocks or 1):
+                return last
+            time.sleep(0.25)
+
+    def _wait_ticket_view_loaded_for_id(self, page: Page, ticket_id_digits: str, timeout_ms: int) -> bool:
+        wanted = self._id_key(ticket_id_digits)
+        if not wanted:
+            return True
+
+        # En algunas vistas, Splynx renderiza dentro de iframes y la URL del page
+        # no siempre refleja el ticket actual. Mejor esperar por elementos del DOM del ticket.
+        selectors = [
+            f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted}",
+            f"css=#admin_support_tickets_closed_sticky_sidebar_{wanted}",
+            f"css=#admin_support_tickets_opened_view_show_hide_activities_{wanted}",
+            f"css=#admin_support_tickets_closed_view_show_hide_activities_{wanted}",
+        ]
+        start = time.monotonic()
+        while True:
+            if (time.monotonic() - start) * 1000.0 > timeout_ms:
+                return False
+
+            # Señal 1: URL con ?id=<wanted> (cuando aplica)
+            try:
+                u = page.url or ""
+                if re.search(rf"[?&]id={re.escape(wanted)}(?:$|[^0-9])", u):
+                    return True
+            except Exception:
+                pass
+
+            # Señal 2: DOM del ticket
+            if self._wait_visible_any(page, selectors, timeout_ms=1_000):
+                return True
+
+            time.sleep(0.2)
+
+    def _ensure_ticket_activities_visible(
+        self,
+        page: Page,
+        scope: LocatorScope,
+        *,
+        ticket_id_digits: str,
+        timeout_ms: int,
+    ) -> None:
+        wanted = self._id_key(ticket_id_digits)
+        if not wanted:
+            raise RuntimeError("ticket_id inválido")
+
+        # 1) Abrir el dropdown de 'Acciones' (verificando que efectivamente abre)
+        try:
+            self._open_actions_dropdown(page, scope, ticket_id_digits=wanted, timeout_ms=min(timeout_ms, 12_000))
+        except Exception:
+            self._open_actions_dropdown(page, page, ticket_id_digits=wanted, timeout_ms=min(timeout_ms, 12_000))
+        page.wait_for_timeout(200)
+
+        # 2) Click en Show activities
+        # Nota: a veces el ID está en el <li> y el clickable real es el <a> dentro.
+        activities_candidates = [
+            # Preferir <a> dentro del item con ID
+            f"css=#admin_support_tickets_opened_view_show_hide_activities_{wanted} a",
+            f"css=#admin_support_tickets_closed_view_show_hide_activities_{wanted} a",
+            f"css=#admin_support_tickets_opened_view_show_hide_activities_{wanted} :is(a,button)",
+            f"css=#admin_support_tickets_closed_view_show_hide_activities_{wanted} :is(a,button)",
+
+            # Fallback al nodo con ID
+            f"css=#admin_support_tickets_opened_view_show_hide_activities_{wanted}",
+            f"css=#admin_support_tickets_closed_view_show_hide_activities_{wanted}",
+            f"css=[id$='_view_show_hide_activities_{wanted}'] a",
+            f"css=[id$='_view_show_hide_activities_{wanted}'] :is(a,button)",
+            f"css=[id$='_view_show_hide_activities_{wanted}']",
+
+            # XPaths por ID
+            f"xpath=//*[@id='admin_support_tickets_opened_view_show_hide_activities_{wanted}']/a",
+            f"xpath=//*[@id='admin_support_tickets_closed_view_show_hide_activities_{wanted}']/a",
+            f"xpath=//*[@id='admin_support_tickets_opened_view_show_hide_activities_{wanted}']",
+            f"xpath=//*[@id='admin_support_tickets_closed_view_show_hide_activities_{wanted}']",
+
+            # Último recurso: XPath absoluto provisto (puede variar según layout)
+            "xpath=/html/body/div[2]/div[3]/div[1]/div/div/div[2]/div[2]/div[1]/div[1]/div/div[2]/div/ul/li[1]/a",
+        ]
+
+        # La opción está dentro del dropdown; esperamos a que sea visible antes del click.
+        if not self._wait_visible_any(page, activities_candidates, timeout_ms=min(timeout_ms, 12_000)):
+            # Reintento: abrir el menú otra vez (a veces el primer click no abre por overlay)
+            try:
+                self._open_actions_dropdown(page, scope, ticket_id_digits=wanted, timeout_ms=6_000)
+            except Exception:
+                self._open_actions_dropdown(page, page, ticket_id_digits=wanted, timeout_ms=6_000)
+            page.wait_for_timeout(200)
+
+        if not self._wait_visible_any(page, activities_candidates, timeout_ms=min(timeout_ms, 12_000)):
+            raise RuntimeError("no pude encontrar la opción 'Show activities' en el menú Acciones")
+
+        # Click robusto (si el selector apunta a <li>, hace click al <a> interno)
+        self._click_menu_item_any(page, scope, activities_candidates)
+
+        # Post-check: esperar a que el dropdown se cierre (si no, Escape best-effort)
+        try:
+            page.wait_for_timeout(150)
+            sidebar_sel = f"css=#admin_support_tickets_opened_sticky_sidebar_{wanted}, #admin_support_tickets_closed_sticky_sidebar_{wanted}, div[id$='_sticky_sidebar_{wanted}']"
+            sidebar = page.locator(sidebar_sel).first
+            if sidebar.count() > 0:
+                start = time.monotonic()
+                while (time.monotonic() - start) < 2.0:
+                    try:
+                        menu = sidebar.locator("css=.dropdown-menu.show").first
+                        if menu.count() == 0 or not menu.is_visible():
+                            break
+                    except Exception:
+                        break
+                    time.sleep(0.1)
+        except Exception:
+            pass
+
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+        # Darle tiempo a Splynx a renderizar el historial.
+        page.wait_for_timeout(600)
+
+        # Espera/verificación: confirmar que aparezcan bloques de historial.
+        # Si no aparecen, reintentar el click de Show activities una vez.
+        blocks = self._wait_activities_loaded(page, scope, timeout_ms=min(timeout_ms, 15_000), min_blocks=1)
+        if blocks <= 0:
+            try:
+                self._open_actions_dropdown(page, scope, ticket_id_digits=wanted, timeout_ms=6_000)
+            except Exception:
+                self._open_actions_dropdown(page, page, ticket_id_digits=wanted, timeout_ms=6_000)
+            page.wait_for_timeout(150)
+            self._click_menu_item_any(page, scope, activities_candidates)
+            page.wait_for_timeout(600)
+            blocks = self._wait_activities_loaded(page, scope, timeout_ms=min(timeout_ms, 15_000), min_blocks=1)
+
+        if blocks <= 0:
+            raise RuntimeError("no se pudo cargar el historial de activities tras 'Show activities'")
+
+    def _extract_last_escalation_om(self, scope: LocatorScope, page: Page) -> str:
+        return self._extract_last_activity_datetime_for_match(
+            scope,
+            page,
+            match_predicate=lambda norm: ("changed group" in norm or "cambiado grupo" in norm or "cambio grupo" in norm)
+            and ("operacion y mantenimiento" in norm or "operación y mantenimiento" in norm),
+        )
+
+    def _extract_last_resuelto(self, scope: LocatorScope, page: Page) -> str:
+        def _pred(norm: str) -> bool:
+            n = norm or ""
+            # Estado destino: Resuelto como palabra completa
+            if not self._has_word(n, "resuelto"):
+                return False
+
+            # Contexto: preferir eventos de cambio de estado.
+            # Si la UI cambia el texto, aceptar también si menciona "status" o "estado".
+            has_context = any(
+                k in n
+                for k in (
+                    "changed status",
+                    "status changed",
+                    "cambiado estado",
+                    "cambio estado",
+                    "cambiar el estado",
+                )
+            )
+            return has_context or ("status" in n) or ("estado" in n)
+
+        return self._extract_last_activity_datetime_for_match(scope, page, match_predicate=_pred)
+
+    def _extract_last_closed(self, scope: LocatorScope, page: Page) -> str:
+        def _pred(norm: str) -> bool:
+            n = norm or ""
+
+            # Contextos típicos de cambio/cierre
+            has_context = any(
+                k in n
+                for k in (
+                    "changed status",
+                    "status changed",
+                    "ticket closed",
+                    "closed ticket",
+                    "cambiado estado",
+                    "cambio estado",
+                    "cambiar el estado",
+                    "ticket cerrado",
+                    "cerrado el ticket",
+                )
+            )
+            if not has_context:
+                return False
+
+            # Estado destino: closed/cerrado como palabra completa
+            return self._has_word(n, "closed") or self._has_word(n, "cerrado")
+
+        return self._extract_last_activity_datetime_for_match(scope, page, match_predicate=_pred)
+
+    def _extract_last_activity_datetime_for_match(
+        self,
+        scope: LocatorScope,
+        page: Page,
+        *,
+        match_predicate,
+    ) -> str:
+        blocks_selector = "css=div[id^='opened-ticket-message-']"
+        dt_selector = "css=div.comment-heading div.comment-title-wrapper span"
+        dt_selector_fallbacks = [
+            dt_selector,
+            "css=div.comment-heading span",
+        ]
+
+        def _get_blocks(container: LocatorScope):
+            return container.locator(blocks_selector)
+
+        blocks = _get_blocks(scope)
+        try:
+            if blocks.count() == 0:
+                blocks = _get_blocks(page)
+        except Exception:
+            blocks = _get_blocks(page)
+
+        best_dt: datetime | None = None
+        best_str = ""
+
+        try:
+            count = blocks.count()
+        except Exception:
+            count = 0
+
+        for i in range(min(count, 400)):
+            blk = blocks.nth(i)
+            try:
+                # text_content permite leer aunque el bloque esté oculto (activities colapsadas)
+                txt = blk.text_content() or ""
+            except Exception:
+                continue
+
+            norm = self._norm_text(txt)
+            if not match_predicate(norm):
+                continue
+
+            try:
+                dt_raw = ""
+                for dsel in dt_selector_fallbacks:
+                    try:
+                        dt_raw = (blk.locator(dsel).first.text_content() or "").strip()
+                    except Exception:
+                        dt_raw = ""
+                    if dt_raw:
+                        break
+            except Exception:
+                dt_raw = ""
+
+            dt = self._parse_activity_datetime(dt_raw)
+            if not dt:
+                # Fallback: en algunos casos el timestamp no está en el heading como esperamos,
+                # pero sí aparece dentro del texto completo del bloque.
+                dt = self._parse_activity_datetime(txt)
+            if not dt:
+                continue
+
+            if best_dt is None or dt > best_dt:
+                best_dt = dt
+                best_str = dt.strftime("%d/%m/%Y %H:%M")
+
+        return best_str
+
+    def _parse_activity_datetime(self, s: str) -> datetime | None:
+        text = (s or "").strip()
+        if not text:
+            return None
+
+        candidates = re.findall(r"\((\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)?)\)", text)
+        if not candidates:
+            candidates = re.findall(r"(\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)?)", text)
+
+        for cand in reversed(candidates):
+            c = cand.strip()
+            if not c:
+                continue
+            for fmt in (
+                "%d/%m/%Y %I:%M:%S %p",
+                "%d/%m/%Y %H:%M:%S",
+                "%d/%m/%Y %I:%M:%S%p",
+                "%d/%m/%Y %H:%M",
+                "%d/%m/%Y %I:%M %p",
+            ):
+                try:
+                    return datetime.strptime(c, fmt)
+                except Exception:
+                    pass
+
+        return None
 
     def _norm_text(self, s: str) -> str:
         s = (s or "").strip().lower()
@@ -528,6 +1385,10 @@ class SplynxSession:
             return Workbook()
         try:
             return load_workbook(path)
+        except zipfile.BadZipFile as exc:
+            raise ValueError(
+                f"El archivo '{path}' no es un .xlsx válido (parece estar corrupto o no es un archivo de Excel)."
+            ) from exc
         except PermissionError as exc:
             raise PermissionError(
                 f"No se puede abrir '{path}'. Probablemente está abierto en Excel o bloqueado. "
@@ -601,11 +1462,34 @@ class SplynxSession:
 
         selectors = [
             "css=body > div.splynx-wrapper > div.splynx-header > ul > li:nth-child(2)",
+            # fallbacks menos frágiles (ícono de búsqueda en header)
+            "css=div.splynx-header ul li:has(i.fa-search)",
+            "css=div.splynx-header ul li:has(i.fa.fa-search)",
+            "css=div.splynx-header :is(a,button):has(i.fa-search)",
+            "css=div.splynx-header :is(a,button):has-text('Search')",
             "xpath=//*[@id='dashboard-page']/body/div[2]/div[2]/ul/li[2]",
             "xpath=/html/body/div[2]/div[2]/ul/li[2]",
             "xpath=//*[@id='opened--view-page']/body/div[2]/div[2]/ul/li[2]",
         ]
         self._click_any(page, selectors)
+
+    def _wait_fast_search_input_visible(self, page: Page, timeout_ms: int) -> bool:
+        selectors = [
+            "css=body > div.splynx-wrapper > div.sidebar-wrapper > div > div.sidebar-content > div > div.search-wrapper > div > input",
+            "css=div.search-wrapper input",
+        ]
+        start = time.monotonic()
+        while True:
+            if (time.monotonic() - start) * 1000.0 > timeout_ms:
+                return False
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() > 0 and loc.is_visible():
+                        return True
+                except Exception:
+                    continue
+            time.sleep(0.2)
 
     def _fast_search_is_open(self, page: Page) -> bool:
         selectors = [
@@ -638,8 +1522,39 @@ class SplynxSession:
 
     def _fast_search_fill(self, page: Page, customer_id: str) -> None:
         # Asegurar panel abierto y limpiar búsqueda previa.
-        self._fast_search_open(page)
-        page.wait_for_timeout(200)
+        # Si el input no aparece (por overlays o estado raro del UI), reintentar y auto-recuperar.
+        def _ensure_open() -> None:
+            if self._fast_search_is_open(page):
+                return
+            self._fast_search_open(page)
+
+        # intento 1
+        _ensure_open()
+        if not self._wait_fast_search_input_visible(page, timeout_ms=6_000):
+            # cerrar overlays y reintentar
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(120)
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(120)
+            except Exception:
+                pass
+
+            _ensure_open()
+
+        if not self._wait_fast_search_input_visible(page, timeout_ms=6_000):
+            # último recurso: recargar y volver a intentar (a veces el sidebar se rompe tras muchos tickets)
+            try:
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+            _ensure_open()
+
+        if not self._wait_fast_search_input_visible(page, timeout_ms=10_000):
+            raise RuntimeError("Fast Search no está visible (no encuentro el input de búsqueda)")
+
+        page.wait_for_timeout(150)
         self._fast_search_clear(page)
 
         selectors = [
@@ -765,16 +1680,96 @@ class SplynxSession:
             return False
 
         rows = page.locator("css=#fast_search_result > tr")
-        deadline = time.monotonic() + 12.0
+
+        # Esperar a que haya al menos UNA fila que realmente corresponda al ticket.
+        deadline = time.monotonic() + 15.0
+        wanted_re = re.compile(rf"(?<!\d){re.escape(wanted_digits)}(?!\d)")
+
+        def _row_has_exact_ticket_id(row_idx: int) -> bool:
+            row = rows.nth(row_idx)
+
+            # Preferir href con ?id=<wanted> exacto (evita falsos positivos tipo 313118 dentro de 2313118)
+            try:
+                links = row.locator("css=a")
+                link_count = min(links.count(), 8)
+            except Exception:
+                link_count = 0
+
+            for j in range(link_count):
+                try:
+                    href = (links.nth(j).get_attribute("href") or "").strip()
+                except Exception:
+                    href = ""
+                if not href:
+                    continue
+                if "ticket" not in href and "tickets" not in href:
+                    continue
+                m = re.search(r"[?&]id=(\d+)", href)
+                if m and m.group(1) == wanted_digits:
+                    return True
+
+            try:
+                txt = row.inner_text() or ""
+            except Exception:
+                txt = ""
+            return bool(wanted_re.search(" ".join(txt.split())))
+
         while True:
             if time.monotonic() > deadline:
                 return False
+
             try:
-                if rows.count() > 0:
-                    break
+                row_count = rows.count()
             except Exception:
-                pass
-            time.sleep(0.2)
+                row_count = 0
+
+            found = False
+            for i in range(min(row_count, 60)):
+                try:
+                    if _row_has_exact_ticket_id(i):
+                        found = True
+                        break
+                except Exception:
+                    continue
+
+            if found:
+                break
+            time.sleep(0.25)
+
+        # Prioridad absoluta: si existe un link de ticket con href ?id=<wanted>, clickealo directamente.
+        # Esto evita que se seleccione la primera opción cuando no corresponde.
+        try:
+            row_count = rows.count()
+        except Exception:
+            row_count = 0
+
+        for i in range(min(row_count, 60)):
+            row = rows.nth(i)
+            try:
+                links = row.locator("css=a")
+                link_count = min(links.count(), 10)
+            except Exception:
+                link_count = 0
+
+            for j in range(link_count):
+                try:
+                    href = (links.nth(j).get_attribute("href") or "").strip()
+                except Exception:
+                    href = ""
+                if not href:
+                    continue
+                if "ticket" not in href and "tickets" not in href:
+                    continue
+                m = re.search(r"[?&]id=(\d+)", href)
+                if m and m.group(1) == wanted_digits:
+                    try:
+                        links.nth(j).click()
+                    except Exception:
+                        try:
+                            links.nth(j).click(force=True)
+                        except Exception:
+                            links.nth(j).evaluate("el => el.click()")
+                    return True
 
         def _first_line(txt: str) -> str:
             t = "\n".join([ln.strip() for ln in (txt or "").splitlines() if ln.strip()])
@@ -796,7 +1791,8 @@ class SplynxSession:
                 continue
 
             compact = " ".join(txt.split())
-            if wanted_digits not in compact:
+            # Evitar coincidencias parciales dentro de otros números largos.
+            if not wanted_re.search(compact):
                 continue
 
             first = self._norm_text(_first_line(txt))
@@ -824,15 +1820,42 @@ class SplynxSession:
             candidates = [
                 f"css=#fast_search_result > tr:has-text('{wanted_digits}'):has-text('ticket') td",
                 f"css=#fast_search_result > tr:has-text('{wanted_digits}'):has-text('Ticket') td",
-                "css=#fast_search_result > tr:nth-child(4) > td",
-                "xpath=//*[@id='fast_search_result']/tr[4]/td",
-                "xpath=/html/body/div[2]/div[5]/div/div[2]/div/div[2]/div/table/tr[4]/td",
+                "css=#fast_search_result > tr:nth-child(2) > td",
+                "xpath=//*[@id='fast_search_result']/tr[2]/td",
+                "xpath=/html/body/div[2]/div[5]/div/div[2]/div/div[2]/div/table/tr[2]/td",
             ]
             try:
                 self._click_any(page, candidates)
                 return True
             except Exception:
                 return False
+
+        # Si hay un <a href="...id=<wanted>"> dentro de la fila ganadora, clickealo.
+        row = rows.nth(best_idx)
+        try:
+            links = row.locator("css=a")
+            link_count = min(links.count(), 10)
+        except Exception:
+            link_count = 0
+
+        for j in range(link_count):
+            try:
+                href = (links.nth(j).get_attribute("href") or "").strip()
+            except Exception:
+                href = ""
+            if not href:
+                continue
+            m = re.search(r"[?&]id=(\d+)", href)
+            if m and m.group(1) == wanted_digits:
+                try:
+                    links.nth(j).click()
+                    return True
+                except Exception:
+                    try:
+                        links.nth(j).click(force=True)
+                        return True
+                    except Exception:
+                        pass
 
         try:
             rows.nth(best_idx).locator("td").first.click()
