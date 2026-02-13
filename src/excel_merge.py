@@ -121,7 +121,7 @@ def merge_tickets_customers(
                 Reporter, Reporter ID, Reporter type, ID Cliente, Incoming Customer, Hide, Task, Estrella,
                 Creado (fecha y hora), Source, Actualizado (fecha y hora), Archive, Shareable, Note,
                 Sub-tipo de Ticket, Categoria del Cierre, Promocion
-      - Columnas de Clientes: Socio, Residencia/Urbanización
+    - Columnas de Clientes: Servicio usuario, Socio, Residencia/Urbanización
 
     Returns: (tickets_rows_total, rows_joined, rows_not_found)
     """
@@ -194,19 +194,23 @@ def merge_tickets_customers(
 
     # Clientes
     c_id = _require(c_cols, "ID")
+    c_servicio = _optional(c_cols, "Servicio usuario")
     c_socio = _require(c_cols, "Socio")
     c_res = _require(c_cols, "Residencia/Urbanización")
 
-    # Build map: customer_id -> (socio, residencia)
-    customer_map: Dict[str, Tuple[str, str]] = {}
+    # Build map: customer_id -> (servicio_usuario, socio, residencia)
+    customer_map: Dict[str, Tuple[str, str, str]] = {}
     customer_row_by_id: Dict[str, int] = {}
     for r in range(2, ws_c.max_row + 1):
         cid = _id_key(ws_c.cell(row=r, column=c_id).value)
         if not cid:
             continue
+        servicio = ""
+        if isinstance(c_servicio, int) and c_servicio > 0:
+            servicio = str(ws_c.cell(row=r, column=c_servicio).value or "").strip()
         socio = str(ws_c.cell(row=r, column=c_socio).value or "").strip()
         res = str(ws_c.cell(row=r, column=c_res).value or "").strip()
-        customer_map[cid] = (socio, res)
+        customer_map[cid] = (servicio, socio, res)
         customer_row_by_id[cid] = r
 
     # Recreate output sheet
@@ -223,7 +227,7 @@ def merge_tickets_customers(
         wb.remove(wb[summary_sheet])
     ws_s = wb.create_sheet(title=summary_sheet)
 
-    out_headers = [*ticket_out_cols, "Socio", "Residencia/Urbanización"]
+    out_headers = [*ticket_out_cols, "Servicio usuario", "Socio", "Residencia/Urbanización"]
     ws_o.append(out_headers)
 
     nf_headers = [*ticket_out_cols]
@@ -327,7 +331,7 @@ def merge_tickets_customers(
             ws_nf.append(nf_row2)
             continue
 
-        socio, res = extra
+        servicio, socio, res = extra
         row: List = []
         for name in ticket_out_cols:
             col = t_col_idx.get(name)
@@ -336,7 +340,7 @@ def merge_tickets_customers(
             else:
                 row.append("")
 
-        row.extend([socio, res])
+        row.extend([servicio, socio, res])
         ws_o.append(row)
         joined += 1
 

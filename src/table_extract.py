@@ -270,6 +270,8 @@ def extract_customers_to_excel(
     output_xlsx: str,
     sheet_name: str = "Datos Clientes",
     table_selector: str = "css=#customers_list_table",
+    max_pages: int | None = None,
+    max_rows: int | None = None,
 ) -> None:
     table = scope.locator(table_selector).first
     table.wait_for(state="visible")
@@ -343,9 +345,8 @@ def extract_customers_to_excel(
 
         return ""
 
-    # Índices (1-based) según lo que nos diste en el header.
-    # Nota: Nos diste Socio y Nacionalidad ambos como columna 9.
-    # Por ahora mantenemos ambos (mismo valor). Si confirmas el índice real, lo ajustamos.
+    # Índices (1-based) como fallback; primero intentamos ubicar por el texto del header.
+    # Se agregó la columna "Servicio usuario" (th:nth-child(9)).
     col_map = [
         ("Estado de Servicio", 2),
         ("ID", 3),
@@ -354,12 +355,13 @@ def extract_customers_to_excel(
         ("Número de Teléfono", 6),
         ("Tarifas de Internet", 7),
         ("Rangos IP", 8),
-        ("Socio", 9),
-        ("Nacionalidad", 9),
-        ("Estado", 10),
-        ("Municipio", 11),
-        ("Parroquia", 12),
-        ("Residencia/Urbanización", 13),
+        ("Servicio usuario", 9),
+        ("Socio", 10),
+        ("Nacionalidad", 11),
+        ("Estado", 12),
+        ("Municipio", 13),
+        ("Parroquia", 14),
+        ("Residencia/Urbanización", 15),
     ]
 
     wb = _open_or_create_workbook(output_xlsx)
@@ -401,6 +403,10 @@ def extract_customers_to_excel(
                     "numero" if col_name == "Número de Teléfono" else "",
                     "tarifas" if col_name == "Tarifas de Internet" else "",
                     "ip" if col_name == "Rangos IP" else "",
+                    "servicio usario" if col_name == "Servicio usuario" else "",
+                    "servicio usuario" if col_name == "Servicio usuario" else "",
+                    "user service" if col_name == "Servicio usuario" else "",
+                    "partner" if col_name == "Socio" else "",
                     "residencia" if col_name == "Residencia/Urbanización" else "",
                 )
                 if zero_idx < 0 or zero_idx >= cell_count:
@@ -448,10 +454,22 @@ def extract_customers_to_excel(
                 return
             time.sleep(0.25)
 
-    # Recorre todas las páginas existentes
+    pages_done = 0
+    rows_written = 0
+
+    # Recorre páginas (o limita por max_pages/max_rows si se indican)
     while True:
-        for r in read_page_rows():
+        page_rows = read_page_rows()
+        for r in page_rows:
             ws.append(r)
+            rows_written += 1
+            if isinstance(max_rows, int) and max_rows > 0 and rows_written >= max_rows:
+                wb.save(output_xlsx)
+                return
+
+        pages_done += 1
+        if isinstance(max_pages, int) and max_pages > 0 and pages_done >= max_pages:
+            break
 
         if not is_next_enabled():
             break
