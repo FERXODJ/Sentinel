@@ -1,3 +1,19 @@
+# Ignorar ejecutables y carpetas de build
+dist/
+build/
+*.spec
+*.exe
+*.dll
+*.pyd
+*.so
+*.bak
+*.tmp
+__pycache__/
+.venv/
+.env/
+*.pyc
+*.log
+output/
 __pycache__/
 *.pyc
 .venv/

@@ -27,6 +27,29 @@ Copia `config.example.json` a `config.json` y ajusta selectores si hace falta:
 python -m src.app
 ```
 
+## Generar ejecutable (.exe)
+
+Este proyecto se puede empaquetar para Windows con **PyInstaller**.
+
+1) Crea el entorno e instala dependencias:
+```bash
+python -m venv .venv
+source .venv/Scripts/activate
+pip install -r requirements.txt
+pip install pyinstaller pyinstaller-hooks-contrib
+```
+
+2) Construye el ejecutable:
+- PowerShell: `./build_exe.ps1`
+- CMD: `build_exe.bat`
+
+Salida: `dist/Sentinel-1/Sentinel-1.exe`
+
+Notas:
+- En la PC destino debe existir **Microsoft Edge**.
+- Si Playwright pide browsers, ejecutar una vez: `playwright install`.
+- Para configuración, usa `config.json` (si no existe, se usa `config.example.json`).
+
 ## Uso
 1. Escribe usuario y contraseña en la IU.
 2. Click **Abrir Splynx** (abre Edge y llena usuario/clave).
